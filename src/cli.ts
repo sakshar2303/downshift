@@ -1,5 +1,6 @@
+import { execFile } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { Command } from "commander";
 import pc from "picocolors";
 import { parseClaudeCodeTranscript } from "./ingest/claude-code.js";
@@ -16,6 +17,7 @@ import {
   stepFrameName,
   validateSpeedscope,
 } from "./flame/speedscope.js";
+import { writeHtmlReport } from "./report/html.js";
 import {
   applyPricing,
   loadModelOverrides,
@@ -108,6 +110,24 @@ function sumTokens(steps: Session["steps"]): Tokens {
   return totals;
 }
 
+function openInBrowser(path: string): void {
+  const absolute = resolve(path);
+  let command = "xdg-open";
+  let args = [absolute];
+  if (process.platform === "darwin") {
+    command = "open";
+  } else if (process.platform === "win32") {
+    command = "cmd";
+    args = ["/c", "start", "", absolute];
+  }
+
+  execFile(command, args, (error) => {
+    if (error !== null) {
+      console.error(pc.yellow(`Could not open ${absolute}: ${error.message}`));
+    }
+  });
+}
+
 function fail(error: unknown): never {
   const message = error instanceof Error ? error.message : String(error);
   console.error(pc.red(message));
@@ -174,7 +194,8 @@ program
   .command("analyze")
   .description("Price a session and show where its spend went")
   .argument("[target]", "a .jsonl transcript, an OpenCode session id, or latest", "latest")
-  .action(async (target: string) => {
+  .option("--open", "open the HTML report in the browser")
+  .action(async (target: string, options: { open?: boolean }) => {
     try {
       const session = loadSession(target);
       const totals = sumTokens(session.steps);
@@ -326,9 +347,14 @@ program
         "utf8",
       );
 
+      const reportPath = join(reportDir, "report.html");
+      writeHtmlReport(session, reportPath);
+
       console.log(
         `\nOpen https://www.speedscope.app and drag in ${reportDir}/flame.speedscope.json`,
       );
+      console.log(`Report: ${reportPath}`);
+      if (options.open === true) openInBrowser(reportPath);
     } catch (error) {
       fail(error);
     }

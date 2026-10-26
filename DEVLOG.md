@@ -179,3 +179,23 @@ indices, non-decreasing `at`, and `endValue` matching the final tick — and
 This is the first view that makes the pitch visual: long bars are where the
 money actually goes, and the read/search bars sitting under an expensive shell
 bucket are the downshift targets.
+
+## 2026-10-26 17:40 IST — Self-contained HTML report
+
+`downshift analyze` now writes `downshift-report/report.html`, a single file
+with inline CSS, JS and SVG — no CDN, no external font, no network request. It
+opens on a dark page: header cards for total cost, tokens, steps, model and the
+share of spend on read+search+test; an icicle chart with session, phase, kind
+and step rows whose widths are cost; and the by-kind table. Hovering a block
+shows label/$/tokens, clicking zooms into that block, and clicking the top row
+resets. `--open` launches it in the browser.
+
+Paths are now display-only relative to the session cwd (`src/cli.ts`) or home
+(`~/.claude/...`), including the flamegraph frames and `steps.json`. Absolute
+paths were leaking the username into screenshots and getting truncated; the
+session itself is still read from its real path.
+
+Every string that comes from a transcript — title, model, frame labels, tool
+names, paths — is HTML-escaped before it reaches the page or an attribute. The
+report is meant to be shared, so a prompt containing markup must render as text,
+not execute.

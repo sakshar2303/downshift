@@ -10,10 +10,10 @@ import type { Session, Step, StepKind, ToolCall } from "../types.js";
 
 const MAX_FRAME_CHARS = 80;
 
-type Phase = "explore" | "plan" | "implement" | "verify";
+export type Phase = "explore" | "plan" | "implement" | "verify";
 
 /** Steps are grouped into contiguous phases so the flamegraph has structure. */
-const PHASE_BY_KIND: Record<StepKind, Phase> = {
+export const PHASE_BY_KIND: Record<StepKind, Phase> = {
   read: "explore",
   search: "explore",
   web: "explore",
@@ -233,7 +233,10 @@ export function stepFrameName(step: Step, sessionCwd?: string): StepFrame {
 }
 
 /** Step width: cost in integer micro-dollars, or tokens when unpriced. */
-function stepValue(step: Step): { value: number; usedTokens: boolean } {
+export function stepSpanValue(step: Step): {
+  value: number;
+  usedTokens: boolean;
+} {
   if (step.costUsd !== undefined && Number.isFinite(step.costUsd)) {
     return { value: Math.max(0, Math.round(step.costUsd * 1_000_000)), usedTokens: false };
   }
@@ -309,7 +312,7 @@ export function buildSpeedscope(session: Session): SpeedscopeFile {
     }
 
     open(frame.name);
-    const priced = stepValue(step);
+    const priced = stepSpanValue(step);
     usedTokens = usedTokens || priced.usedTokens;
     at += priced.value;
     close(frame.name);
