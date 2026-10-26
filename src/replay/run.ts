@@ -11,9 +11,16 @@ import {
 import type { Session, StepKind } from "../types.js";
 import {
   buildReplayRequest,
+  type ReplayAction,
   type ReplayRequest,
 } from "./context.js";
+import { score, type JudgedAction } from "../judge/action-match.js";
+import {
+  judgePlan,
+  type PlanJudgeResult,
+} from "../judge/llm-judge.js";
 import { sampleSteps } from "./sampler.js";
+import type { CanonicalAction, CanonicalToolName } from "./tools.js";
 
 const REPLAY_DIR = join(".downshift", "replay");
 const REPORT_PATH = join("downshift-report", "replays.json");
@@ -41,6 +48,10 @@ export interface ReplayRecord {
   latencyMs: number;
   error?: string;
   cached?: boolean;
+  /** Deterministic action-match score, or the LLM judge score for plans. */
+  score?: number;
+  judge?: PlanJudgeResult | null;
+  judgeError?: string;
 }
 
 export interface ReplayReport {
@@ -85,6 +96,8 @@ export interface ReplayOptions {
   models: string[];
   perKind: number;
   seed: number;
+  /** Injectable plan judge, primarily for tests. */
+  judgePlanStep?: (original: string, replayed: string) => Promise<PlanJudgeResult>;
 }
 
 interface CachedChat {
@@ -135,6 +148,59 @@ function readCache(path: string): CachedChat | undefined {
 function writeCache(path: string, value: CachedChat): void {
   mkdirSync(REPLAY_DIR, { recursive: true });
   writeFileSync(path, JSON.stringify(value), "utf8");
+}
+
+/** Convert a replay response into the shape the action scorer understands. */
+function judgedAction(replayed: ReplayedAction | null): JudgedAction {
+  if (replayed === null) return null;
+  if ("text" in replayed) return { text: replayed.text };
+  return {
+    tool: replayed.tool as CanonicalToolName,
+    args:
+      typeof replayed.args === "object" && replayed.args !== null
+        ? (replayed.args as Record<string, unknown>)
+        : {},
+  };
+}
+
+function replayedText(replayed: ReplayedAction | null): string {
+  if (replayed === null) return "";
+  if ("text" in replayed) return replayed.text;
+  return JSON.stringify({ tool: replayed.tool, args: replayed.args });
+}
+
+/**
+ * Score how closely a replay reproduced the recorded step. Tool steps use the
+ * deterministic scorer; plan steps (text) go to the LLM judge.
+ */
+async function attachScore(
+  record: ReplayRecord,
+  original: ReplayAction | null,
+  cwd: string,
+  judge: (original: string, replayed: string) => Promise<PlanJudgeResult>,
+): Promise<void> {
+  if (original === null) return;
+
+  if (!("text" in original)) {
+    const canonicalOriginal: CanonicalAction = original;
+    record.score = score(judgedAction(record.replayed), canonicalOriginal, cwd);
+    return;
+  }
+
+  if (record.replayed === null) {
+    record.score = 0;
+    return;
+  }
+
+  try {
+    const judgement = await judge(original.text, replayedText(record.replayed));
+    record.judge = judgement;
+    record.score = judgement.score;
+  } catch (error) {
+    record.judgeError = redactSecrets(
+      error instanceof Error ? error.message : String(error),
+    );
+  }
 }
 
 function replayedAction(message: ChatResult["message"]): ReplayedAction | null {
@@ -255,6 +321,8 @@ export async function runReplay(
   hooks.onPlan?.(buildPlan(calls));
 
   const records: ReplayRecord[] = [];
+  const cwd = session.cwd ?? process.cwd();
+  const judge = options.judgePlanStep ?? judgePlan;
 
   for (let index = 0; index < calls.length; index += 1) {
     const call = calls[index] as PreparedCall;
@@ -270,6 +338,7 @@ export async function runReplay(
         latencyMs: cached.latencyMs,
         cached: true,
       };
+      await attachScore(record, call.request.original, cwd, judge);
       records.push(record);
       hooks.onProgress?.(record, index + 1, calls.length);
       continue;
@@ -297,6 +366,7 @@ export async function runReplay(
         latencyMs: result.latencyMs,
         cached: false,
       };
+      await attachScore(record, call.request.original, cwd, judge);
       records.push(record);
       hooks.onProgress?.(record, index + 1, calls.length);
     } catch (error) {

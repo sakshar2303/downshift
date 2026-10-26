@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { Command } from "commander";
 import pc from "picocolors";
@@ -17,7 +17,7 @@ import {
   stepFrameName,
   validateSpeedscope,
 } from "./flame/speedscope.js";
-import { writeHtmlReport } from "./report/html.js";
+import { addReportSections, escapeHtml, writeHtmlReport } from "./report/html.js";
 import { runDoctor } from "./providers/doctor.js";
 import { configureProviders, parseModelRef } from "./providers/index.js";
 import {
@@ -29,6 +29,18 @@ import {
   loadModelOverrides,
 } from "./pricing/model-map.js";
 import { loadPricing } from "./pricing/openrouter.js";
+import {
+  aggregateEvidence,
+  buildPolicy,
+  computeProjectedSavings,
+  createPriceLookup,
+  listPriceRank,
+  writePolicyFile,
+  type EvidenceByKind,
+  type ModelStats,
+  type ProjectedSavings,
+} from "./policy/policy.js";
+import type { ReplayReport } from "./replay/run.js";
 import type { Session, StepKind, Tokens } from "./types.js";
 
 const program = new Command();
@@ -67,6 +79,178 @@ function sumStepTokens(tokens: Tokens): number {
     tokens.cacheWrite +
     tokens.reasoning
   );
+}
+
+function readReplayReport(path: string): ReplayReport {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8"));
+  } catch (error) {
+    throw new Error(
+      `Could not read replay report ${path}: ${error instanceof Error ? error.message : String(error)}. Run \`downshift replay latest\` first.`,
+    );
+  }
+
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`Replay report ${path} is not a JSON object.`);
+  }
+  const record = parsed as Record<string, unknown>;
+  if (!Array.isArray(record.records)) {
+    throw new Error(`Replay report ${path} has no records array.`);
+  }
+  if (
+    typeof record.session !== "object" ||
+    record.session === null ||
+    typeof (record.session as Record<string, unknown>).model !== "string"
+  ) {
+    throw new Error(`Replay report ${path} has no session model.`);
+  }
+  return parsed as ReplayReport;
+}
+
+function loadReportSession(report: ReplayReport): Session | undefined {
+  try {
+    if (report.session.source === "opencode") {
+      return loadOpencodeSession(report.session.path, report.session.id);
+    }
+    return parseClaudeCodeTranscript(report.session.path);
+  } catch {
+    return undefined;
+  }
+}
+
+function modelColumns(evidence: EvidenceByKind): string[] {
+  const models = new Set<string>();
+  for (const stats of evidence.values()) {
+    for (const entry of stats) models.add(entry.model);
+  }
+  return [...models].sort((a, b) => a.localeCompare(b));
+}
+
+function statsFor(stats: ModelStats[], model: string): ModelStats | undefined {
+  return stats.find((entry) => entry.model === model);
+}
+
+function matchColor(rate: number | undefined): (text: string) => string {
+  if (rate === undefined) return pc.dim;
+  if (rate >= 0.8) return pc.green;
+  if (rate >= 0.5) return pc.yellow;
+  return pc.red;
+}
+
+function renderColorMatrix(
+  rows: string[][],
+  colors: Array<Array<(text: string) => string>>,
+): string {
+  const widths: number[] = [];
+  for (const row of rows) {
+    row.forEach((cell, index) => {
+      widths[index] = Math.max(widths[index] ?? 0, cell.length);
+    });
+  }
+
+  return rows
+    .map((row, rowIndex) =>
+      row
+        .map((cell, index) => {
+          const padded =
+            index === row.length - 1
+              ? cell
+              : cell.padEnd(widths[index] ?? cell.length);
+          const color = colors[rowIndex]?.[index] ?? ((text: string) => text);
+          return color(padded);
+        })
+        .join("  ")
+        .trimEnd(),
+    )
+    .join("\n");
+}
+
+function renderMatrix(evidence: EvidenceByKind): string {
+  const models = modelColumns(evidence);
+  if (models.length === 0) return pc.dim("No scored replay records.");
+
+  const rows: string[][] = [["KIND", ...models]];
+  const colors: Array<Array<(text: string) => string>> = [
+    rows[0]!.map(() => pc.bold),
+  ];
+
+  for (const [kind, stats] of evidence) {
+    const row: string[] = [kind];
+    const rowColors: Array<(text: string) => string> = [pc.cyan];
+    for (const model of models) {
+      const entry = statsFor(stats, model);
+      row.push(entry === undefined ? "-" : `${(entry.matchRate * 100).toFixed(0)}%`);
+      rowColors.push(matchColor(entry?.matchRate));
+    }
+    rows.push(row);
+    colors.push(rowColors);
+  }
+
+  return renderColorMatrix(rows, colors);
+}
+
+function renderSavingsTable(savings: ProjectedSavings): string {
+  if (savings.kinds.length === 0) return pc.dim("No kinds were downshifted.");
+  const rows: string[][] = [
+    ["KIND", "ROUTE", "STEPS", "BEFORE", "AFTER", "SAVED"],
+  ];
+  for (const entry of savings.kinds) {
+    rows.push([
+      entry.kind,
+      entry.model,
+      formatCount(entry.steps),
+      formatUsd(entry.beforeUsd),
+      formatUsd(entry.afterUsd),
+      formatUsd(entry.savedUsd),
+    ]);
+  }
+  return renderTable(rows);
+}
+
+function matrixBody(evidence: EvidenceByKind): string {
+  const models = modelColumns(evidence);
+  const header = ["Kind", ...models]
+    .map((cell) => `<th>${escapeHtml(cell)}</th>`)
+    .join("");
+  const rows = [...evidence]
+    .map(([kind, stats]) => {
+      const cells = models
+        .map((model) => {
+          const entry = statsFor(stats, model);
+          return `<td>${entry === undefined ? "-" : `${(entry.matchRate * 100).toFixed(0)}%`}</td>`;
+        })
+        .join("");
+      return `<tr><td>${escapeHtml(kind)}</td>${cells}</tr>`;
+    })
+    .join("\n");
+  return `<table><thead><tr>${header}</tr></thead><tbody>\n${rows}\n</tbody></table>
+<p class="hint">Match rate is the share of replayed steps scoring at least 80% against the recorded action.</p>`;
+}
+
+function savingsBody(savings: ProjectedSavings): string {
+  const cells: Array<[string, string]> = [
+    ["Before", formatUsd(savings.beforeUsd)],
+    ["After", formatUsd(savings.afterUsd)],
+    ["Saved", `${savings.savedPct.toFixed(1)}%`],
+  ];
+  const cards = cells
+    .map(
+      ([label, value]) =>
+        `<div><div class="label">${escapeHtml(label)}</div><div class="value">${escapeHtml(value)}</div></div>`,
+    )
+    .join("\n");
+  const rows = savings.kinds
+    .map(
+      (entry) =>
+        `<tr><td>${escapeHtml(entry.kind)}</td><td>${escapeHtml(entry.model)}</td><td>${escapeHtml(formatCount(entry.steps))}</td><td>${escapeHtml(formatUsd(entry.beforeUsd))}</td><td>${escapeHtml(formatUsd(entry.afterUsd))}</td></tr>`,
+    )
+    .join("\n");
+  return `<div class="savings">\n${cards}\n</div>
+<table><thead><tr><th>Kind</th><th>Route</th><th>Steps</th><th>Before</th><th>After</th></tr></thead><tbody>
+${rows}
+</tbody></table>
+<p class="note">Projected at list prices — actual spend $0.</p>`;
 }
 
 function renderTable(rows: string[][]): string {
@@ -484,7 +668,143 @@ program
     }
   });
 
-program.addCommand(placeholder("policy", "Manage routing policies for agent steps"));
+program
+  .command("policy")
+  .description("Turn replay scores into a routing policy and projected savings")
+  .argument(
+    "[report]",
+    "replay report path",
+    "downshift-report/replays.json",
+  )
+  .option("--threshold <n>", "minimum match rate to downshift a kind", "0.9")
+  .option("--out <path>", "policy output path", "downshift.policy.yaml")
+  .option("--html <path>", "HTML report to augment", "downshift-report/report.html")
+  .action(
+    async (
+      reportPath: string,
+      options: { threshold: string; out: string; html: string },
+    ) => {
+      try {
+        const threshold = Number.parseFloat(options.threshold);
+        if (!Number.isFinite(threshold) || threshold < 0 || threshold > 1) {
+          throw new Error(
+            `Invalid --threshold "${options.threshold}". Expected a number between 0 and 1.`,
+          );
+        }
+
+        const report = readReplayReport(reportPath);
+        const scored = report.records.filter(
+          (record) =>
+            record.error === undefined && typeof record.score === "number",
+        );
+        if (scored.length === 0) {
+          throw new Error(
+            `No scored replay records in ${reportPath}. Run \`downshift replay latest\` again to attach action-match scores.`,
+          );
+        }
+        const unscored = report.records.length - scored.length;
+        if (unscored > 0) {
+          console.log(
+            pc.yellow(
+              `${unscored} of ${report.records.length} replay records have no score and were ignored.`,
+            ),
+          );
+        }
+
+        const pricing = await loadPricing();
+        const lookup = createPriceLookup(pricing);
+        const policy = buildPolicy(report, {
+          threshold,
+          priceRank: listPriceRank(lookup),
+        });
+        const evidence = aggregateEvidence(report.records);
+        const policyPath = writePolicyFile(policy, options.out);
+
+        console.log(pc.bold("Replay matrix (match rate)"));
+        console.log(renderMatrix(evidence));
+        console.log(
+          pc.dim(
+            "green >= 80%  yellow >= 50%  red < 50%  dim = no samples",
+          ),
+        );
+        console.log(
+          pc.dim(
+            `frontier: ${policy.frontier}  threshold: ${(threshold * 100).toFixed(0)}%  cheapest model with >= 2 samples wins`,
+          ),
+        );
+
+        console.log(`\n${pc.bold("Route")}`);
+        const routeRows: string[][] = [["KIND", "ROUTE", "MATCH", "SAMPLES"]];
+        for (const [kind, entry] of Object.entries(policy.evidence)) {
+          const route = policy.route[kind] ?? "frontier";
+          routeRows.push([
+            kind,
+            route,
+            `${(entry.matchRate * 100).toFixed(1)}%`,
+            formatCount(entry.samples),
+          ]);
+        }
+        console.log(renderTable(routeRows));
+        console.log(`\nWrote ${policyPath}`);
+
+        const session = loadReportSession(report);
+        let savings: ProjectedSavings | undefined;
+        if (session === undefined) {
+          console.log(
+            pc.yellow(
+              "Could not load the replayed session; skipping projected savings.",
+            ),
+          );
+        } else {
+          for (const step of session.steps) step.kind ??= classifyStep(step);
+          savings = computeProjectedSavings(
+            session.steps.map((step) => ({
+              kind: step.kind ?? "other",
+              tokens: step.tokens,
+            })),
+            policy,
+            lookup,
+          );
+
+          console.log(`\n${pc.bold("Projected savings")}`);
+          console.log(
+            `Before ${formatUsd(savings.beforeUsd)}  After ${formatUsd(savings.afterUsd)}  Saved ${savings.savedPct.toFixed(1)}%`,
+          );
+          console.log(renderSavingsTable(savings));
+          console.log(
+            pc.yellow(
+              "projected at list prices — actual spend $0 (local + free tiers)",
+            ),
+          );
+        }
+
+        const sections = [
+          {
+            id: "replay-matrix",
+            title: "Replay matrix",
+            body: matrixBody(evidence),
+          },
+        ];
+        if (savings !== undefined) {
+          sections.push({
+            id: "projected-savings",
+            title: "Projected savings",
+            body: savingsBody(savings),
+          });
+        }
+        if (addReportSections(options.html, sections)) {
+          console.log(`Updated ${options.html}`);
+        } else {
+          console.log(
+            pc.dim(`No HTML report at ${options.html}; skipped report sections.`),
+          );
+        }
+      } catch (error) {
+        fail(error);
+      }
+    },
+  );
+
 program.addCommand(placeholder("bench", "Run the benchmark suite for open models"));
 
 program.parse();

@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  addReportSections,
   buildGroupedBlocks,
   buildHtmlReport,
   escapeHtml,
@@ -262,5 +263,73 @@ describe("buildGroupedBlocks", () => {
     expect(readSteps[0]?.end).toBe(400);
     expect(readSteps[1]?.start).toBe(400);
     expect(readSteps[1]?.end).toBe(450);
+  });
+});
+
+describe("addReportSections", () => {
+  it("adds sections and replaces a section with the same id", () => {
+    const dir = mkdtempSync(join(tmpdir(), "downshift-html-"));
+    try {
+      const path = join(dir, "report.html");
+      writeHtmlReport(session, path);
+
+      expect(
+        addReportSections(path, [
+          { id: "replay-matrix", title: "Replay matrix", body: "<p>first</p>" },
+        ]),
+      ).toBe(true);
+
+      let html = readFileSync(path, "utf8");
+      expect(html).toContain("Replay matrix");
+      expect(html).toContain("<p>first</p>");
+      expect(html).toContain("<!-- downshift:extra-sections -->");
+
+      addReportSections(path, [
+        { id: "replay-matrix", title: "Replay matrix", body: "<p>second</p>" },
+        {
+          id: "projected-savings",
+          title: "Projected savings",
+          body: "<p>savings</p>",
+        },
+      ]);
+
+      html = readFileSync(path, "utf8");
+      expect(html).not.toContain("<p>first</p>");
+      expect(html).toContain("<p>second</p>");
+      expect(html).toContain("<p>savings</p>");
+      expect(html.split('data-downshift-section="replay-matrix"')).toHaveLength(
+        2,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("escapes section titles and ids", () => {
+    const dir = mkdtempSync(join(tmpdir(), "downshift-html-"));
+    try {
+      const path = join(dir, "report.html");
+      writeHtmlReport(session, path);
+      addReportSections(path, [
+        {
+          id: 'x"><script>alert(1)</script>',
+          title: "<b>unsafe</b>",
+          body: "<p>body</p>",
+        },
+      ]);
+      const html = readFileSync(path, "utf8");
+      expect(html).not.toContain("<script>alert(1)</script>");
+      expect(html).toContain("&lt;b&gt;unsafe&lt;/b&gt;");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns false when the report does not exist", () => {
+    expect(
+      addReportSections(join(tmpdir(), "downshift-missing-report.html"), [
+        { id: "x", title: "X", body: "" },
+      ]),
+    ).toBe(false);
   });
 });
