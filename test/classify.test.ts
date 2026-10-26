@@ -118,7 +118,7 @@ describe("classifyStep", () => {
       ["sed -i 's/a/b/' f", "shell"],
       ["npm run -s typecheck", "test"],
       ["git add -A && git commit -m x && git push", "shell"],
-      ["cat > f.ts <<EOF", "shell"],
+      ["cat > f.ts <<EOF", "edit"],
       ["FOO=bar cat package.json", "read"],
       ["ls -la", "search"],
       ["rg TODO src", "search"],
@@ -132,13 +132,63 @@ describe("classifyStep", () => {
       ["git diff HEAD~1", "search"],
       ["grep -rn vitest src", "search"],
       ["cat jest.config.ts", "read"],
-      ["make 2> build.log", "shell"],
+      ["make 2> build.log", "edit"],
     ];
 
     for (const [command, expected] of cases) {
       expect(classifyShellCommand(command)).toBe(expected);
       expect(classifyStep(step([tool("Bash", { command })]))).toBe(expected);
     }
+  });
+
+  it("never labels a destructive find as search", () => {
+    expect(classifyShellCommand("find . -name '*.ts'")).toBe("search");
+    expect(classifyShellCommand("find . -name '*.log' -delete")).toBe("shell");
+    expect(
+      classifyShellCommand("find . -name '*.ts' -exec rm {} \\;"),
+    ).toBe("shell");
+    expect(classifyShellCommand("find . -name '*.ts' -execdir ls {} \\;")).toBe(
+      "shell",
+    );
+    expect(classifyShellCommand("find . -name '*.ts' -ok rm {} \\;")).toBe(
+      "shell",
+    );
+    expect(classifyShellCommand("find . -name '*.ts' -fprint out.txt")).toBe(
+      "shell",
+    );
+    expect(classifyShellCommand("find . -type f -fls out.txt")).toBe("shell");
+  });
+
+  it("skips git global options before reading the subcommand", () => {
+    expect(classifyShellCommand("git -C ../x status")).toBe("search");
+    expect(classifyShellCommand("git -c core.pager=cat log")).toBe("search");
+    expect(classifyShellCommand("git --git-dir=/tmp/x/.git status")).toBe(
+      "search",
+    );
+    expect(classifyShellCommand("git --git-dir /tmp/x/.git diff")).toBe(
+      "search",
+    );
+    expect(classifyShellCommand("git --work-tree ../x status")).toBe("search");
+    expect(classifyShellCommand("git --work-tree=../x show HEAD")).toBe(
+      "search",
+    );
+    expect(classifyShellCommand("git -C ../x commit -m x")).toBe("shell");
+  });
+
+  it("treats file-writing redirects and tee as edits, not shell", () => {
+    expect(classifyShellCommand("echo hi > out.txt")).toBe("edit");
+    expect(classifyShellCommand("echo hi >> out.txt")).toBe("edit");
+    expect(classifyShellCommand("cat > f.ts <<EOF")).toBe("edit");
+    expect(classifyShellCommand("echo hi | tee out.txt")).toBe("edit");
+    expect(classifyShellCommand("echo hi | tee -a out.txt")).toBe("edit");
+    expect(classifyShellCommand('echo "> not a redirect"')).toBe("shell");
+  });
+
+  it("keeps discarding redirects and fd dups out of edit", () => {
+    expect(classifyShellCommand("npm test > /dev/null")).toBe("test");
+    expect(classifyShellCommand("npm test 2>&1")).toBe("test");
+    expect(classifyShellCommand("npm test >/dev/null 2>&1")).toBe("test");
+    expect(classifyShellCommand("echo hi | tee /dev/null")).toBe("shell");
   });
 
   it("does not split on separators inside quotes", () => {

@@ -46,6 +46,25 @@ const READ_PROGRAMS = new Set([
 /** Program names whose whole job is locating or filtering content. */
 const SEARCH_PROGRAMS = new Set(["grep", "rg", "ag", "find", "fd", "ls", "tree"]);
 
+/** find actions that delete, execute or write, not just locate. */
+const DESTRUCTIVE_FIND_FLAGS = new Set([
+  "-delete",
+  "-exec",
+  "-execdir",
+  "-ok",
+  "-okdir",
+  "-fprint",
+  "-fls",
+]);
+
+/** git global options that consume the following argument. */
+const GIT_OPTIONS_WITH_VALUE = new Set([
+  "-C",
+  "-c",
+  "--git-dir",
+  "--work-tree",
+]);
+
 /** git subcommands that only inspect history or the working tree. */
 const GIT_READ_SUBCOMMANDS = new Set([
   "status",
@@ -156,10 +175,61 @@ function firstWord(token: string): string {
   return token.replace(/^["']|["']$/g, "").split("/").pop() ?? token;
 }
 
-function hasOutputRedirection(segment: string): boolean {
-  // Ignore quoted text, and fd duplication such as 2>&1 or >&2.
-  const unquoted = stripQuotes(segment);
-  return />>|<</.test(unquoted) || /(?<![&])>(?!&)/.test(unquoted);
+/**
+ * Targets of `>`/`>>` redirections that actually write a file. Quoted text and
+ * fd duplications (`2>&1`, `>&2`) are ignored, as is `> /dev/null`.
+ */
+function fileWriteTargets(segment: string): string[] {
+  const targets: string[] = [];
+  let quote: '"' | "'" | undefined;
+
+  for (let index = 0; index < segment.length; index += 1) {
+    const char = segment[index];
+
+    if (quote !== undefined) {
+      if (char === quote) quote = undefined;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+    if (char !== ">") continue;
+
+    let cursor = index + 1;
+    if (segment[cursor] === ">") cursor += 1;
+    if (segment[cursor] === "&") {
+      index = cursor;
+      continue;
+    }
+    while (segment[cursor] === " " || segment[cursor] === "\t") cursor += 1;
+
+    let target = "";
+    const targetQuote = segment[cursor];
+    if (targetQuote === '"' || targetQuote === "'") {
+      cursor += 1;
+      while (cursor < segment.length && segment[cursor] !== targetQuote) {
+        target += segment[cursor];
+        cursor += 1;
+      }
+      if (segment[cursor] === targetQuote) cursor += 1;
+    } else {
+      while (cursor < segment.length && !/[\s;&|]/.test(segment[cursor] ?? "")) {
+        target += segment[cursor];
+        cursor += 1;
+      }
+    }
+
+    if (target !== "" && target !== "/dev/null") targets.push(target);
+    index = cursor - 1;
+  }
+
+  return targets;
+}
+
+/** True when the segment redirects output into a real file (or writes one). */
+function writesFile(segment: string): boolean {
+  return fileWriteTargets(segment).length > 0;
 }
 
 function commandWords(segment: string): string[] {
@@ -170,8 +240,25 @@ function firstNonFlag(args: string[]): string | undefined {
   return args.find((arg) => !arg.startsWith("-"));
 }
 
+function gitSubcommand(args: string[]): string | undefined {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index] ?? "";
+
+    // Both "--git-dir=x" and "--git-dir x" forms carry their value inline or in
+    // the next argument.
+    if (arg.startsWith("--git-dir=") || arg.startsWith("--work-tree=")) continue;
+    if (GIT_OPTIONS_WITH_VALUE.has(arg)) {
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith("-")) continue;
+    return arg.toLowerCase();
+  }
+  return undefined;
+}
+
 function classifyGit(args: string[]): StepKind {
-  const subcommand = firstNonFlag(args)?.toLowerCase();
+  const subcommand = gitSubcommand(args);
   return subcommand !== undefined && GIT_READ_SUBCOMMANDS.has(subcommand)
     ? "search"
     : "shell";
@@ -219,7 +306,8 @@ export function classifyCommandSegment(segment: string): StepKind {
   const trimmed = stripEnvAssignments(segment);
   if (trimmed === "") return "other";
 
-  if (hasOutputRedirection(trimmed)) return "shell";
+  // A command that writes a file is an edit, regardless of the program.
+  if (writesFile(trimmed)) return "edit";
 
   const words = commandWords(trimmed);
   const program = firstWord(words[0] ?? "").toLowerCase();
@@ -229,7 +317,20 @@ export function classifyCommandSegment(segment: string): StepKind {
   // the test suite. Only command runners are checked against the test pattern.
   if (READ_PROGRAMS.has(program)) return "read";
   if (program === "sed") return classifySed(args);
+  if (
+    program === "find" &&
+    args.some((arg) => DESTRUCTIVE_FIND_FLAGS.has(arg))
+  ) {
+    return "shell";
+  }
   if (SEARCH_PROGRAMS.has(program)) return "search";
+  if (program === "tee") {
+    const files = args
+      .filter((arg) => !arg.startsWith("-"))
+      .map((arg) => arg.replace(/^["']|["']$/g, ""))
+      .filter((arg) => arg !== "/dev/null");
+    if (files.length > 0) return "edit";
+  }
   if (program === "git") return classifyGit(args);
   if (program === "npm" || program === "pnpm" || program === "yarn" || program === "bun") {
     return classifyPackageManager(args);
