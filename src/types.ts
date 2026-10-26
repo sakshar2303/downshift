@@ -45,6 +45,8 @@ export interface Session {
   id: string;
   source: Step["source"];
   title?: string;
+  /** First real user prompt, kept for replay context (titles are truncated). */
+  firstUserMessage?: string;
   path: string;
   cwd?: string;
   steps: Step[];

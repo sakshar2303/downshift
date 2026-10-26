@@ -22,12 +22,17 @@ const TITLE_TAG_BLOCKS: RegExp[] = [
 const TITLE_STRAY_TAGS =
   /<\/?(?:system-reminder|local-command-[a-z0-9-]*|command-[a-z0-9-]*)\b[^>]*>/gi;
 
-/** Turn arbitrary prompt text into a single-line, length-capped title. */
-export function deriveTitle(text: string): string {
+/** Strip machine tags and collapse whitespace without length-capping. */
+export function cleanPromptText(text: string): string {
   let cleaned = text;
   for (const pattern of TITLE_TAG_BLOCKS) cleaned = cleaned.replace(pattern, " ");
   cleaned = cleaned.replace(TITLE_STRAY_TAGS, " ");
-  return cleaned.replace(/\s+/g, " ").trim().slice(0, MAX_TITLE_CHARS);
+  return cleaned.replace(/\s+/g, " ").trim();
+}
+
+/** Turn arbitrary prompt text into a single-line, length-capped title. */
+export function deriveTitle(text: string): string {
+  return cleanPromptText(text).slice(0, MAX_TITLE_CHARS);
 }
 
 /** Extract plain text from a message content string or block array. */
@@ -116,6 +121,7 @@ export function parseClaudeCodeTranscript(path: string): Session {
   let anonymousSteps = 0;
   let customTitle: string | undefined;
   let firstUserTitle: string | undefined;
+  let firstUserMessage: string | undefined;
 
   const attachOutput = (toolUseId: string, output: string): void => {
     toolOutputs.set(toolUseId, output);
@@ -165,12 +171,17 @@ export function parseClaudeCodeTranscript(path: string): Session {
     const content = message.content;
 
     if (type === "user") {
-      if (firstUserTitle === undefined) {
+      if (firstUserMessage === undefined || firstUserTitle === undefined) {
         // Messages that only carry tool results have no text and are skipped.
         const text = readMessageText(content);
         if (text !== undefined) {
-          const title = deriveTitle(text);
-          if (title !== "") firstUserTitle = title;
+          const cleaned = cleanPromptText(text);
+          if (cleaned !== "") {
+            if (firstUserMessage === undefined) firstUserMessage = cleaned;
+            if (firstUserTitle === undefined) {
+              firstUserTitle = cleaned.slice(0, MAX_TITLE_CHARS);
+            }
+          }
         }
       }
       if (!Array.isArray(content)) continue;
@@ -249,6 +260,7 @@ export function parseClaudeCodeTranscript(path: string): Session {
     id: resolvedSessionId,
     source: "claude-code",
     title: customTitle ?? firstUserTitle,
+    firstUserMessage,
     path,
     cwd,
     steps,

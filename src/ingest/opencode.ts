@@ -188,12 +188,28 @@ function buildSession(
   }
 
   const steps: Step[] = [];
+  let firstUserMessage: string | undefined;
 
   for (const message of messages) {
     const messageId = asString(message.id);
     if (messageId === undefined) continue;
 
     const data = parseJson(message.data);
+
+    if (data?.role === "user") {
+      if (firstUserMessage === undefined) {
+        const texts: string[] = [];
+        for (const part of partsByMessage.get(messageId) ?? []) {
+          const partData = parseJson(part.data);
+          if (partData?.type !== "text") continue;
+          const text = asString(partData.text);
+          if (text !== undefined && text.trim() !== "") texts.push(text);
+        }
+        if (texts.length > 0) firstUserMessage = texts.join("\n").trim();
+      }
+      continue;
+    }
+
     if (data?.role !== "assistant") continue;
 
     const messageTokens = readTokens(data.tokens);
@@ -303,6 +319,7 @@ function buildSession(
     id: row.id,
     source: "opencode",
     title: row.title,
+    firstUserMessage,
     path: dbPath,
     cwd: row.directory,
     steps,
