@@ -28,6 +28,8 @@ export const DEFAULT_MAX_STEPS = 30;
 export const COMMAND_TIMEOUT_MS = 60_000;
 export const COMMAND_OUTPUT_LIMIT = 1_500;
 export const READ_OUTPUT_LIMIT = 6_000;
+export const TEXT_ONLY_NUDGE =
+  "Use a tool to continue, or call finish with a summary if the task is done.";
 
 /** Commands the benchmark agent may run, matched at a word boundary. */
 export const ALLOWED_COMMAND_PREFIXES = [
@@ -676,6 +678,7 @@ export async function runBenchAgent(
   let summary: string | undefined;
   let escalatedSteps = 0;
   let lastTool: string | undefined;
+  let textOnlyReplies = 0;
 
   for (let step = 1; step <= maxSteps && !finished; step += 1) {
     const selectedModel = await options.chooseModel({
@@ -754,9 +757,17 @@ export async function runBenchAgent(
     lastTool = firstTool;
 
     if (toolCalls.length === 0) {
+      textOnlyReplies += 1;
+      if (textOnlyReplies === 1) {
+        messages.push({ role: "user", content: TEXT_ONLY_NUDGE });
+      } else {
+        finished = true;
+      }
       options.onStep?.(record);
+      if (finished) break;
       continue;
     }
+    textOnlyReplies = 0;
 
     for (const call of toolCalls) {
       const name = call.function.name;

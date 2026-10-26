@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   Sandbox,
+  TEXT_ONLY_NUDGE,
   acceptsDownshift,
   hashTestFiles,
   isCommandAllowed,
@@ -441,6 +442,37 @@ describe("agent loop", () => {
     try {
       expect(result.finished).toBe(false);
       expect(result.steps).toHaveLength(2);
+    } finally {
+      rmSync(result.tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("nudges once then ends the run on a second text-only reply", async () => {
+    let calls = 0;
+    let sawNudge = false;
+    const result = await runBenchAgent({
+      taskDir: taskDir(),
+      install: false,
+      maxSteps: 5,
+      chooseModel: () => "ollama:small",
+      chatFn: async (_modelRef, options) => {
+        calls += 1;
+        if (calls === 2) {
+          sawNudge = options.messages.some(
+            (message) =>
+              message.role === "user" && message.content === TEXT_ONLY_NUDGE,
+          );
+        }
+        return reply("still thinking about it");
+      },
+    });
+
+    try {
+      expect(calls).toBe(2);
+      expect(sawNudge).toBe(true);
+      expect(result.finished).toBe(true);
+      expect(result.steps).toHaveLength(2);
+      expect(result.steps.every((step) => step.tool === "text")).toBe(true);
     } finally {
       rmSync(result.tempDir, { recursive: true, force: true });
     }
