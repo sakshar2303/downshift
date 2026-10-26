@@ -1,4 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterAll, describe, expect, it } from "vitest";
+import { parseClaudeCodeTranscript } from "../src/ingest/claude-code.js";
 import {
   buildReplayRequest,
   type ReplayRequest,
@@ -55,6 +59,12 @@ function estimate(request: ReplayRequest): number {
 function messageText(request: ReplayRequest): string {
   return JSON.stringify(request.messages);
 }
+
+const tempDirs: string[] = [];
+
+afterAll(() => {
+  for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
+});
 
 describe("canonical tool mapping", () => {
   it("exports the canonical tool set", () => {
@@ -326,10 +336,94 @@ describe("buildReplayRequest", () => {
     expect(messageText(small)).not.toContain("src/target.ts");
   });
 
+  it("keeps user prompts and drops older tool output first when trimming", () => {
+    const largeOutput = "Z".repeat(3_000);
+    const trimmedSession = session([
+      step(0, {
+        userText: "first prompt",
+        tools: [tool("Read", { file_path: "src/a.ts" }, largeOutput)],
+      }),
+      step(1, {
+        userText: "second prompt",
+        tools: [tool("Bash", { command: "npm test" }, "all green")],
+      }),
+      step(2, { tools: [tool("Read", { file_path: "src/target.ts" })] }),
+    ]);
+
+    const full = buildReplayRequest(trimmedSession, 2, 100_000);
+    expect(messageText(full)).toContain(largeOutput.slice(0, 100));
+
+    const trimmed = buildReplayRequest(trimmedSession, 2, 200);
+    const userMessages = trimmed.messages.filter(
+      (message) => message.role === "user",
+    );
+    expect(userMessages.map((message) => message.content)).toEqual([
+      "first prompt",
+      "second prompt",
+    ]);
+    // The oldest tool exchange is gone before any user prompt is dropped.
+    expect(messageText(trimmed)).not.toContain(largeOutput.slice(0, 100));
+    expect(estimate(trimmed)).toBeLessThanOrEqual(200);
+  });
+
   it("rejects an out-of-range step index", () => {
     expect(() => buildReplayRequest(session([]), 0, 10_000)).toThrow(
       /out of range/,
     );
+  });
+
+  it("includes every user prompt, with the latest as the most recent user message", () => {
+    const dir = mkdtempSync(join(tmpdir(), "downshift-replay-context-"));
+    tempDirs.push(dir);
+    const path = join(dir, "transcript.jsonl");
+
+    const userLine = (text: string, second: number): string =>
+      JSON.stringify({
+        type: "user",
+        sessionId: "sess-prompts",
+        timestamp: `2026-10-26T13:00:0${second}.000Z`,
+        message: { role: "user", content: text },
+      });
+    const assistantLine = (id: string, second: number): string =>
+      JSON.stringify({
+        type: "assistant",
+        sessionId: "sess-prompts",
+        timestamp: `2026-10-26T13:00:0${second}.000Z`,
+        message: {
+          id,
+          model: "claude-sonnet-4-5",
+          content: [{ type: "text", text: `reply to ${id}` }],
+          usage: { input_tokens: 10, output_tokens: 5 },
+        },
+      });
+
+    writeFileSync(
+      path,
+      [
+        userLine("first prompt", 0),
+        assistantLine("msg_one", 1),
+        userLine("second prompt", 2),
+        assistantLine("msg_two", 3),
+        userLine("third prompt", 4),
+        assistantLine("msg_three", 5),
+      ].join("\n"),
+      "utf8",
+    );
+
+    const parsed = parseClaudeCodeTranscript(path);
+    expect(parsed.steps).toHaveLength(3);
+
+    // Replay the assistant turn that answered the third prompt.
+    const built = buildReplayRequest(parsed, 2, 100_000);
+    const userMessages = built.messages.filter(
+      (message) => message.role === "user",
+    );
+    expect(userMessages.map((message) => message.content)).toEqual([
+      "first prompt",
+      "second prompt",
+      "third prompt",
+    ]);
+    expect(userMessages[userMessages.length - 1]?.content).toBe("third prompt");
   });
 });
 

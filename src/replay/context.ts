@@ -8,6 +8,9 @@ import {
 
 const TOOL_OUTPUT_LIMIT = 1500;
 
+/** Placeholder kept in place of an old tool result when trimming for budget. */
+const DROPPED_TOOL_OUTPUT = "(tool output dropped to fit the context budget)";
+
 /**
  * The original system prompt is not stored in transcripts, so replays use a
  * neutral equivalent. It deliberately says nothing task-specific.
@@ -79,12 +82,58 @@ function originalAction(step: Step): ReplayAction | null {
 }
 
 /**
+ * A chronological slice of the conversation. Tool turns are kept together
+ * (assistant tool_calls plus their tool results) so any prefix stays valid for
+ * the API; a user prompt is its own block so it can survive when old tool
+ * output is discarded.
+ */
+interface ContextBlock {
+  messages: ChatMessage[];
+  kind: "user" | "assistant" | "tool-turn";
+  /** The fallback first prompt and the most recent user prompt are never dropped. */
+  protected: boolean;
+}
+
+/** Build the replay context, oldest first, from the steps before `stepIndex`. */
+function historyBlocks(session: Session, stepIndex: number): ContextBlock[] {
+  const blocks: ContextBlock[] = [];
+
+  for (let index = 0; index < stepIndex; index += 1) {
+    const prior = session.steps[index];
+    if (prior === undefined || prior.isSidechain) continue;
+
+    const userText = prior.userText?.trim();
+    if (userText !== undefined && userText !== "") {
+      blocks.push({
+        messages: [{ role: "user", content: userText }],
+        kind: "user",
+        protected: false,
+      });
+    }
+
+    const messages = historyMessages(prior);
+    if (messages.length > 0) {
+      blocks.push({
+        messages,
+        kind: messages.some((message) => message.role === "tool")
+          ? "tool-turn"
+          : "assistant",
+        protected: false,
+      });
+    }
+  }
+
+  return blocks;
+}
+
+/**
  * Build the chat request for replaying one step.
  *
  * History is reconstructed from the preceding assistant steps in the session,
  * because transcripts store tool results but not a replay-ready conversation.
- * The oldest turns are dropped until the character/4 estimate fits the
- * provider's context budget; the system prompt and first user message stay.
+ * Every captured user prompt is included in order. The oldest turns are dropped
+ * until the character/4 estimate fits the provider's context budget: old tool
+ * output goes first, and the most recent user prompt always stays.
  */
 export function buildReplayRequest(
   session: Session,
@@ -106,25 +155,55 @@ export function buildReplayRequest(
   const firstUserMessage =
     session.firstUserMessage ?? session.title ?? "(no user message captured)";
 
-  const base: ChatMessage[] = [
-    { role: "system", content: SYSTEM_PROMPT },
-    { role: "user", content: firstUserMessage },
-  ];
+  const blocks = historyBlocks(session, stepIndex);
+  // The prompt that produced this step is the most recent user turn even though
+  // the step's own assistant output must stay out of the request.
+  const targetUserText = step.userText?.trim();
+  if (targetUserText !== undefined && targetUserText !== "") {
+    blocks.push({
+      messages: [{ role: "user", content: targetUserText }],
+      kind: "user",
+      protected: false,
+    });
+  }
+  const hasUserTurn = blocks.some((block) => block.kind === "user");
 
-  const turns: ChatMessage[][] = [];
-  for (let index = 0; index < stepIndex; index += 1) {
-    const prior = session.steps[index];
-    if (prior === undefined || prior.isSidechain) continue;
-    const messages = historyMessages(prior);
-    if (messages.length > 0) turns.push(messages);
+  // Transcripts from before userText existed only expose the first prompt.
+  if (!hasUserTurn) {
+    blocks.unshift({
+      messages: [{ role: "user", content: firstUserMessage }],
+      kind: "user",
+      protected: true,
+    });
+  }
+  for (let index = blocks.length - 1; index >= 0; index -= 1) {
+    if (blocks[index]?.kind === "user") {
+      // The most recent prompt is the actual instruction for this step.
+      (blocks[index] as ContextBlock).protected = true;
+      break;
+    }
   }
 
-  let messages = [...base, ...turns.flat()];
-  while (estimateTokens(messages) > maxContextTokens && turns.length > 0) {
-    // Keep the most recent turns: an agent needs local context more than the
-    // beginning of a long session.
-    turns.shift();
-    messages = [...base, ...turns.flat()];
+  const system: ChatMessage = { role: "system", content: SYSTEM_PROMPT };
+  const build = (): ChatMessage[] => [
+    system,
+    ...blocks.flatMap((block) => block.messages),
+  ];
+
+  let messages = build();
+  while (estimateTokens(messages) > maxContextTokens) {
+    // Prefer discarding old tool exchanges, then old assistant turns and older
+    // user prompts, before touching anything protected.
+    let victim = blocks.findIndex(
+      (block) => !block.protected && block.kind === "tool-turn",
+    );
+    if (victim === -1) {
+      victim = blocks.findIndex((block) => !block.protected);
+    }
+    if (victim === -1) break;
+
+    blocks.splice(victim, 1);
+    messages = build();
   }
 
   return {

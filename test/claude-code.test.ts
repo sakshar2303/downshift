@@ -256,4 +256,55 @@ describe("parseClaudeCodeTranscript", () => {
     expect(parsed.steps[0]?.id).toBe("msg_real");
     expect(parsed.steps[0]?.model).toBe("claude-sonnet-4-5");
   });
+
+  it("attaches each human prompt to the next assistant step", () => {
+    const prompt = (text: string, timestamp: string): string =>
+      JSON.stringify({
+        type: "user",
+        sessionId: "sess-turns",
+        timestamp,
+        message: { role: "user", content: text },
+      });
+    const assistant = (id: string, timestamp: string): string =>
+      JSON.stringify({
+        type: "assistant",
+        sessionId: "sess-turns",
+        timestamp,
+        message: {
+          id,
+          model: "claude-sonnet-4-5",
+          content: [{ type: "text", text: `reply to ${id}` }],
+          usage: { input_tokens: 1, output_tokens: 1 },
+        },
+      });
+    const toolResult: string = JSON.stringify({
+      type: "user",
+      sessionId: "sess-turns",
+      timestamp: "2026-10-26T12:00:01.500Z",
+      message: {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: "toolu_x", content: "ok" }],
+      },
+    });
+
+    const path = writeTempTranscript([
+      prompt("first prompt", "2026-10-26T12:00:00.000Z"),
+      assistant("msg_one", "2026-10-26T12:00:01.000Z"),
+      toolResult,
+      prompt(
+        "<system-reminder>ignored</system-reminder>\nsecond prompt",
+        "2026-10-26T12:00:02.000Z",
+      ),
+      assistant("msg_two", "2026-10-26T12:00:03.000Z"),
+      prompt("third prompt", "2026-10-26T12:00:04.000Z"),
+      assistant("msg_three", "2026-10-26T12:00:05.000Z"),
+    ]);
+
+    const parsed = parseClaudeCodeTranscript(path);
+    expect(parsed.steps.map((step) => step.userText)).toEqual([
+      "first prompt",
+      "second prompt",
+      "third prompt",
+    ]);
+  });
 });

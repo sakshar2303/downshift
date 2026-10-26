@@ -34,6 +34,8 @@ export interface Step {
   startedAt: number;
   tools: ToolCall[];
   text?: string;
+  /** Human text that prompted this assistant turn. */
+  userText?: string;
   tokens: Tokens;
   recordedCostUsd?: number;
   isSidechain: boolean;

@@ -73,6 +73,20 @@ function createSyntheticDb(): string {
     });
 
   insertMessage.run(
+    "msg_u1",
+    sessionId,
+    900,
+    JSON.stringify({ role: "user" }),
+  );
+  insertPart.run(
+    "p_u1",
+    "msg_u1",
+    sessionId,
+    901,
+    JSON.stringify({ type: "text", text: "Read the config and run tests." }),
+  );
+
+  insertMessage.run(
     "msg_a",
     sessionId,
     1000,
@@ -161,6 +175,20 @@ function createSyntheticDb(): string {
       cost: 0,
       reason: "end",
     }),
+  );
+
+  insertMessage.run(
+    "msg_u2",
+    sessionId,
+    1500,
+    JSON.stringify({ role: "user" }),
+  );
+  insertPart.run(
+    "p_u2",
+    "msg_u2",
+    sessionId,
+    1501,
+    JSON.stringify({ type: "text", text: "Now check git status." }),
   );
 
   insertMessage.run(
@@ -326,6 +354,17 @@ describe("loadOpencodeSession", () => {
     expect(session.steps[2]?.text).toBe("All tests pass.");
     expect(session.steps[2]?.tools.map((tool) => tool.name)).toEqual(["bash"]);
     expect(session.steps[2]?.tools[0]?.output).toHaveLength(4000);
+  });
+
+  it("attaches each user prompt to the first step of the next assistant turn", () => {
+    if (session === undefined) throw new Error("expected a session");
+
+    expect(session.firstUserMessage).toBe("Read the config and run tests.");
+    expect(session.steps.map((step) => step.userText)).toEqual([
+      "Read the config and run tests.",
+      undefined,
+      "Now check git status.",
+    ]);
   });
 
   it("returns undefined for an unknown session", () => {

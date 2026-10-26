@@ -122,6 +122,8 @@ export function parseClaudeCodeTranscript(path: string): Session {
   let customTitle: string | undefined;
   let firstUserTitle: string | undefined;
   let firstUserMessage: string | undefined;
+  /** User text seen since the last assistant turn, attached to the next one. */
+  let pendingUserText: string | undefined;
 
   const attachOutput = (toolUseId: string, output: string): void => {
     toolOutputs.set(toolUseId, output);
@@ -171,18 +173,18 @@ export function parseClaudeCodeTranscript(path: string): Session {
     const content = message.content;
 
     if (type === "user") {
-      if (firstUserMessage === undefined || firstUserTitle === undefined) {
-        // Messages that only carry tool results have no text and are skipped.
-        const text = readMessageText(content);
-        if (text !== undefined) {
-          const cleaned = cleanPromptText(text);
-          if (cleaned !== "") {
-            if (firstUserMessage === undefined) firstUserMessage = cleaned;
-            if (firstUserTitle === undefined) {
-              firstUserTitle = cleaned.slice(0, MAX_TITLE_CHARS);
-            }
-          }
+      // Messages that only carry tool results have no text and are skipped.
+      const text = readMessageText(content);
+      const cleaned = text === undefined ? "" : cleanPromptText(text);
+      if (cleaned !== "") {
+        if (firstUserMessage === undefined) firstUserMessage = cleaned;
+        if (firstUserTitle === undefined) {
+          firstUserTitle = cleaned.slice(0, MAX_TITLE_CHARS);
         }
+        pendingUserText =
+          pendingUserText === undefined
+            ? cleaned
+            : `${pendingUserText}\n\n${cleaned}`;
       }
       if (!Array.isArray(content)) continue;
       for (const block of content) {
@@ -216,6 +218,10 @@ export function parseClaudeCodeTranscript(path: string): Session {
         tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
         isSidechain: parsed.isSidechain === true,
       };
+      if (pendingUserText !== undefined && step.isSidechain === false) {
+        step.userText = pendingUserText;
+        pendingUserText = undefined;
+      }
       stepsByMessageId.set(key, step);
       steps.push(step);
     } else {

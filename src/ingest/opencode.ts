@@ -137,6 +137,7 @@ interface Segment {
   cost?: number;
   tools: ToolCall[];
   texts: string[];
+  userText?: string;
 }
 
 interface SessionRow {
@@ -189,6 +190,8 @@ function buildSession(
 
   const steps: Step[] = [];
   let firstUserMessage: string | undefined;
+  /** User text seen since the last assistant message, attached to its first segment. */
+  let pendingUserText: string | undefined;
 
   for (const message of messages) {
     const messageId = asString(message.id);
@@ -197,15 +200,20 @@ function buildSession(
     const data = parseJson(message.data);
 
     if (data?.role === "user") {
-      if (firstUserMessage === undefined) {
-        const texts: string[] = [];
-        for (const part of partsByMessage.get(messageId) ?? []) {
-          const partData = parseJson(part.data);
-          if (partData?.type !== "text") continue;
-          const text = asString(partData.text);
-          if (text !== undefined && text.trim() !== "") texts.push(text);
-        }
-        if (texts.length > 0) firstUserMessage = texts.join("\n").trim();
+      const texts: string[] = [];
+      for (const part of partsByMessage.get(messageId) ?? []) {
+        const partData = parseJson(part.data);
+        if (partData?.type !== "text") continue;
+        const text = asString(partData.text);
+        if (text !== undefined && text.trim() !== "") texts.push(text);
+      }
+      if (texts.length > 0) {
+        const joined = texts.join("\n").trim();
+        if (firstUserMessage === undefined) firstUserMessage = joined;
+        pendingUserText =
+          pendingUserText === undefined
+            ? joined
+            : `${pendingUserText}\n\n${joined}`;
       }
       continue;
     }
@@ -228,6 +236,11 @@ function buildSession(
         tools: [],
         texts: [],
       };
+      // The human prompt belongs to the first step of the next assistant turn.
+      if (pendingUserText !== undefined) {
+        segment.userText = pendingUserText;
+        pendingUserText = undefined;
+      }
       segmentIndex += 1;
       return segment;
     };
@@ -245,6 +258,9 @@ function buildSession(
         startedAt: segment.startedAt,
         tools: segment.tools,
         text: segment.texts.length > 0 ? segment.texts.join("\n") : undefined,
+        ...(segment.userText !== undefined
+          ? { userText: segment.userText }
+          : {}),
         tokens: segment.tokens ?? messageTokens,
         recordedCostUsd: segment.cost,
         isSidechain: false,
