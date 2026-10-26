@@ -79,3 +79,26 @@ segmentation, per-step tokens and tool capture.
 
 Tooling note: Vitest 2's bundled vite-node stripped `node:` before checking
 builtins and could not load `node:sqlite`; Vitest 3 knows the new builtin.
+
+## 2026-10-26 15:10 IST — Fixes from real sessions
+
+**These bugs only showed up against real data.** Cross-checking the parser with
+actual transcripts and Alan Code sessions turned up three things the fixtures
+never exercised: titles were being taken from the first user line, which is
+usually a `<system-reminder>` blob (and ignored the `custom-title` rename the
+user actually chose); `<synthetic>` assistant messages ("Credit balance is too
+low", "No response requested.") were counted as steps, inflating step counts
+for sessions that never made a real API call; and `latest` always meant "newest
+of anything", so there was no way to ask for the newest Alan Code session
+specifically.
+
+Titles now prefer the last `custom-title`, otherwise the first user message
+with machine tags stripped and tool-result-only messages skipped; discovery
+reuses the parser rather than re-deriving titles. `latest:alan`,
+`latest:opencode`, `latest:claude-code` and `downshift sessions --source` make
+source-scoped views possible.
+
+**The reassuring part:** once synthetic steps were excluded, Downshift's token
+totals match Alan's own session totals exactly. The ingestion is reading the
+same numbers the product shows, which is the baseline the whole cost story
+depends on.

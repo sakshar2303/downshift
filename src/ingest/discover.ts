@@ -12,7 +12,8 @@ import { parseClaudeCodeTranscript } from "./claude-code.js";
 import { listOpencodeSessions, opencodeDbPaths } from "./opencode.js";
 
 const UNTITLED = "(untitled)";
-const MAX_TITLE_CHARS = 60;
+
+export type SourceFilter = Session["source"];
 
 export interface DiscoveredSession {
   id: string;
@@ -39,11 +40,6 @@ function asString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
-function normalizeTitle(text: string): string {
-  const collapsed = text.replace(/\s+/g, " ").trim();
-  return collapsed.slice(0, MAX_TITLE_CHARS);
-}
-
 function stepTokens(steps: Step[]): number {
   let total = 0;
   for (const step of steps) {
@@ -57,12 +53,8 @@ function stepTokens(steps: Step[]): number {
   return total;
 }
 
-/** Read the first real user prompt (title) and the newest timestamp. */
-function readClaudeMetadata(path: string): {
-  title?: string;
-  updatedAt: number;
-} {
-  let title: string | undefined;
+/** Read the newest timestamp from a transcript. */
+function readClaudeUpdatedAt(path: string): number {
   let updatedAt = 0;
 
   for (const line of readFileSync(path, "utf8").split(/\r?\n/)) {
@@ -81,27 +73,6 @@ function readClaudeMetadata(path: string): {
       const millis = Date.parse(timestamp);
       if (Number.isFinite(millis) && millis > updatedAt) updatedAt = millis;
     }
-
-    if (title !== undefined || parsed.type !== "user") continue;
-    const message = isRecord(parsed.message) ? parsed.message : undefined;
-    if (message === undefined) continue;
-
-    const content = message.content;
-    let text: string | undefined;
-    if (typeof content === "string") {
-      text = content;
-    } else if (Array.isArray(content)) {
-      const blocks: string[] = [];
-      for (const block of content) {
-        if (!isRecord(block) || block.type !== "text") continue;
-        const blockText = asString(block.text);
-        if (blockText !== undefined) blocks.push(blockText);
-      }
-      text = blocks.join("\n");
-    }
-
-    const normalized = text === undefined ? "" : normalizeTitle(text);
-    if (normalized !== "") title = normalized;
   }
 
   if (updatedAt === 0) {
@@ -112,7 +83,7 @@ function readClaudeMetadata(path: string): {
     }
   }
 
-  return { title, updatedAt };
+  return updatedAt;
 }
 
 function discoverClaudeCodeSessions(): DiscoveredSession[] {
@@ -142,15 +113,14 @@ function discoverClaudeCodeSessions(): DiscoveredSession[] {
       const path = join(dirPath, file.name);
       try {
         const session = parseClaudeCodeTranscript(path);
-        const metadata = readClaudeMetadata(path);
         found.push({
           id: basename(file.name).replace(/\.jsonl$/i, ""),
           source: "claude-code",
-          title: metadata.title ?? UNTITLED,
+          title: session.title ?? UNTITLED,
           path,
           stepCount: session.steps.length,
           totalTokens: stepTokens(session.steps),
-          updatedAt: metadata.updatedAt,
+          updatedAt: readClaudeUpdatedAt(path),
         });
       } catch {
         // An unreadable or half-written transcript should not hide the rest.
@@ -186,9 +156,25 @@ function discoverOpencodeSessions(): DiscoveredSession[] {
   return found;
 }
 
+/**
+ * Map a user-facing source name to an ingest source. "alan" is the Alan Code
+ * app, which runs on the OpenCode engine and writes the same database format.
+ */
+export function normalizeSource(value: string): SourceFilter | undefined {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "opencode" || normalized === "alan") return "opencode";
+  if (normalized === "claude-code" || normalized === "claude") {
+    return "claude-code";
+  }
+  return undefined;
+}
+
 /** Every recorded session on this machine, newest first. */
-export function discoverSessions(): DiscoveredSession[] {
-  return [...discoverClaudeCodeSessions(), ...discoverOpencodeSessions()].sort(
+export function discoverSessions(filter?: SourceFilter): DiscoveredSession[] {
+  const all = [...discoverClaudeCodeSessions(), ...discoverOpencodeSessions()];
+  const filtered =
+    filter === undefined ? all : all.filter((session) => session.source === filter);
+  return filtered.sort(
     (a, b) => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id),
   );
 }
@@ -215,19 +201,36 @@ function findOpencodeSession(sessionId: string): ResolvedTarget | undefined {
   return undefined;
 }
 
-/** Resolve a CLI target: a transcript path, an OpenCode session id, or "latest". */
+function resolveLatest(filter?: SourceFilter): ResolvedTarget {
+  const latest = discoverSessions(filter)[0];
+  if (latest === undefined) {
+    const scope = filter === undefined ? "" : ` for source "${filter}"`;
+    throw new Error(`No recorded sessions found${scope}.`);
+  }
+  return {
+    id: latest.id,
+    source: latest.source,
+    path: latest.path,
+    title: latest.title,
+  };
+}
+
+/**
+ * Resolve a CLI target: a transcript path, an OpenCode session id, "latest", or
+ * "latest:<source>" to pick the newest session from one source only.
+ */
 export function resolveTarget(target: string): ResolvedTarget {
-  if (target === "latest") {
-    const latest = discoverSessions()[0];
-    if (latest === undefined) {
-      throw new Error("No recorded sessions found.");
+  if (target === "latest") return resolveLatest();
+
+  if (target.startsWith("latest:")) {
+    const requested = target.slice("latest:".length);
+    const filter = normalizeSource(requested);
+    if (filter === undefined) {
+      throw new Error(
+        `Unknown source "${requested}". Expected alan, opencode, or claude-code.`,
+      );
     }
-    return {
-      id: latest.id,
-      source: latest.source,
-      path: latest.path,
-      title: latest.title,
-    };
+    return resolveLatest(filter);
   }
 
   const isPath = target.toLowerCase().endsWith(".jsonl") || existsSync(target);
@@ -247,6 +250,6 @@ export function resolveTarget(target: string): ResolvedTarget {
   if (opencode !== undefined) return opencode;
 
   throw new Error(
-    `Could not resolve session "${target}". Expected a .jsonl transcript path, an OpenCode session id, or "latest".`,
+    `Could not resolve session "${target}". Expected a .jsonl transcript path, an OpenCode session id, "latest", or "latest:<source>".`,
   );
 }

@@ -1,7 +1,11 @@
 import { Command } from "commander";
 import pc from "picocolors";
 import { parseClaudeCodeTranscript } from "./ingest/claude-code.js";
-import { discoverSessions, resolveTarget } from "./ingest/discover.js";
+import {
+  discoverSessions,
+  normalizeSource,
+  resolveTarget,
+} from "./ingest/discover.js";
 import { loadOpencodeSession } from "./ingest/opencode.js";
 import type { Session, Tokens } from "./types.js";
 
@@ -90,11 +94,26 @@ program
 program
   .command("sessions")
   .description("List the newest recorded agent sessions")
-  .action(() => {
+  .option("-s, --source <source>", "only show claude-code, opencode, or alan sessions")
+  .action((options: { source?: string }) => {
     try {
-      const sessions = discoverSessions();
+      let filter: ReturnType<typeof normalizeSource>;
+      if (options.source !== undefined) {
+        filter = normalizeSource(options.source);
+        if (filter === undefined) {
+          throw new Error(
+            `Unknown source "${options.source}". Expected alan, opencode, or claude-code.`,
+          );
+        }
+      }
+
+      const sessions = discoverSessions(filter);
       if (sessions.length === 0) {
-        console.log("No recorded sessions found.");
+        console.log(
+          options.source === undefined
+            ? "No recorded sessions found."
+            : `No recorded ${options.source} sessions found.`,
+        );
         return;
       }
 

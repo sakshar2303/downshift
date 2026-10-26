@@ -144,4 +144,116 @@ describe("parseClaudeCodeTranscript", () => {
     expect(parsed.steps).toEqual([]);
     expect(parsed.id).toBe("transcript");
   });
+
+  it("prefers the last custom title over the first user message", () => {
+    const path = writeTempTranscript([
+      JSON.stringify({
+        type: "user",
+        sessionId: "sess-title",
+        timestamp: "2026-10-26T11:00:00.000Z",
+        message: { role: "user", content: "first prompt" },
+      }),
+      JSON.stringify({
+        type: "custom-title",
+        sessionId: "sess-title",
+        customTitle: "old title",
+        timestamp: "2026-10-26T11:00:01.000Z",
+      }),
+      JSON.stringify({
+        type: "custom-title",
+        sessionId: "sess-title",
+        customTitle: "new title",
+        timestamp: "2026-10-26T11:00:02.000Z",
+      }),
+    ]);
+
+    expect(parseClaudeCodeTranscript(path).title).toBe("new title");
+  });
+
+  it("strips machine tags and skips tool-result-only user messages", () => {
+    const path = writeTempTranscript([
+      JSON.stringify({
+        type: "user",
+        sessionId: "sess-tags",
+        timestamp: "2026-10-26T11:00:00.000Z",
+        message: {
+          role: "user",
+          content: [
+            { type: "tool_result", tool_use_id: "toolu_1", content: "ok" },
+          ],
+        },
+      }),
+      JSON.stringify({
+        type: "user",
+        sessionId: "sess-tags",
+        timestamp: "2026-10-26T11:00:01.000Z",
+        message: {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: [
+                "<system-reminder>",
+                "The user started this session without choosing a project folder.",
+                "</system-reminder>",
+                "<local-command-caveat>context only</local-command-caveat>",
+                "<command-name>/compact</command-name>",
+                "Fix the flaky ingestion test",
+              ].join("\n"),
+            },
+          ],
+        },
+      }),
+    ]);
+
+    expect(parseClaudeCodeTranscript(path).title).toBe(
+      "Fix the flaky ingestion test",
+    );
+  });
+
+  it("truncates the fallback title to 60 chars", () => {
+    const longPrompt = "a".repeat(200);
+    const path = writeTempTranscript([
+      JSON.stringify({
+        type: "user",
+        sessionId: "sess-long",
+        timestamp: "2026-10-26T11:00:00.000Z",
+        message: { role: "user", content: longPrompt },
+      }),
+    ]);
+
+    expect(parseClaudeCodeTranscript(path).title).toHaveLength(60);
+  });
+
+  it("skips synthetic assistant placeholders", () => {
+    const path = writeTempTranscript([
+      JSON.stringify({
+        type: "assistant",
+        sessionId: "sess-synthetic",
+        timestamp: "2026-10-26T11:00:00.000Z",
+        message: {
+          id: "msg_synthetic",
+          model: "<synthetic>",
+          content: [{ type: "text", text: "Credit balance is too low" }],
+          usage: { input_tokens: 0, output_tokens: 0 },
+        },
+      }),
+      JSON.stringify({
+        type: "assistant",
+        sessionId: "sess-synthetic",
+        timestamp: "2026-10-26T11:00:01.000Z",
+        message: {
+          id: "msg_real",
+          model: "claude-sonnet-4-5",
+          content: [{ type: "text", text: "Real answer." }],
+          usage: { input_tokens: 10, output_tokens: 5 },
+        },
+      }),
+    ]);
+
+    const parsed = parseClaudeCodeTranscript(path);
+    expect(parsed.steps).toHaveLength(1);
+    expect(parsed.steps[0]?.id).toBe("msg_real");
+    expect(parsed.steps[0]?.model).toBe("claude-sonnet-4-5");
+  });
 });

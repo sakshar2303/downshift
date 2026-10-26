@@ -5,6 +5,45 @@ import type { Session, Step, Tokens, ToolCall } from "../types.js";
 /** Tool results are clipped so a single huge output can't dominate a session. */
 const MAX_TOOL_OUTPUT_CHARS = 4000;
 
+/** Titles are a one-line preview in the CLI table, not the full prompt. */
+export const MAX_TITLE_CHARS = 60;
+
+/**
+ * Claude Code wraps machine-generated context in tags that say nothing about
+ * what the user asked for. Strip whole blocks before deriving a title.
+ */
+const TITLE_TAG_BLOCKS: RegExp[] = [
+  /<system-reminder>[\s\S]*?<\/system-reminder>/gi,
+  /<local-command-[a-z0-9-]*>[\s\S]*?<\/local-command-[a-z0-9-]*>/gi,
+  /<command-[a-z0-9-]*>[\s\S]*?<\/command-[a-z0-9-]*>/gi,
+];
+
+/** Drop any unpaired tag left behind by a truncated or nested block. */
+const TITLE_STRAY_TAGS =
+  /<\/?(?:system-reminder|local-command-[a-z0-9-]*|command-[a-z0-9-]*)\b[^>]*>/gi;
+
+/** Turn arbitrary prompt text into a single-line, length-capped title. */
+export function deriveTitle(text: string): string {
+  let cleaned = text;
+  for (const pattern of TITLE_TAG_BLOCKS) cleaned = cleaned.replace(pattern, " ");
+  cleaned = cleaned.replace(TITLE_STRAY_TAGS, " ");
+  return cleaned.replace(/\s+/g, " ").trim().slice(0, MAX_TITLE_CHARS);
+}
+
+/** Extract plain text from a message content string or block array. */
+function readMessageText(content: unknown): string | undefined {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return undefined;
+
+  const blocks: string[] = [];
+  for (const block of content) {
+    if (!isRecord(block) || block.type !== "text") continue;
+    const text = asString(block.text);
+    if (text !== undefined) blocks.push(text);
+  }
+  return blocks.length > 0 ? blocks.join("\n") : undefined;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -75,6 +114,8 @@ export function parseClaudeCodeTranscript(path: string): Session {
   let sessionId: string | undefined;
   let cwd: string | undefined;
   let anonymousSteps = 0;
+  let customTitle: string | undefined;
+  let firstUserTitle: string | undefined;
 
   const attachOutput = (toolUseId: string, output: string): void => {
     toolOutputs.set(toolUseId, output);
@@ -99,6 +140,14 @@ export function parseClaudeCodeTranscript(path: string): Session {
     if (!isRecord(parsed)) continue;
 
     const type = parsed.type;
+    if (type === "custom-title") {
+      // A user rename can appear more than once; the last one wins.
+      const renamed = asString(parsed.customTitle);
+      if (renamed !== undefined && renamed.trim() !== "") {
+        customTitle = renamed.trim();
+      }
+      continue;
+    }
     if (type !== "assistant" && type !== "user") continue;
 
     const lineSessionId = asString(parsed.sessionId);
@@ -116,6 +165,14 @@ export function parseClaudeCodeTranscript(path: string): Session {
     const content = message.content;
 
     if (type === "user") {
+      if (firstUserTitle === undefined) {
+        // Messages that only carry tool results have no text and are skipped.
+        const text = readMessageText(content);
+        if (text !== undefined) {
+          const title = deriveTitle(text);
+          if (title !== "") firstUserTitle = title;
+        }
+      }
       if (!Array.isArray(content)) continue;
       for (const block of content) {
         if (!isRecord(block) || block.type !== "tool_result") continue;
@@ -125,6 +182,11 @@ export function parseClaudeCodeTranscript(path: string): Session {
       }
       continue;
     }
+
+    // "<synthetic>" marks local placeholder/error output ("Credit balance is
+    // too low", "No response requested."), not a real API call, so it is not a
+    // replayable step.
+    if (asString(message.model) === "<synthetic>") continue;
 
     const messageId = asString(message.id);
     const key = messageId ?? `anonymous-${anonymousSteps++}`;
@@ -186,6 +248,7 @@ export function parseClaudeCodeTranscript(path: string): Session {
   return {
     id: resolvedSessionId,
     source: "claude-code",
+    title: customTitle ?? firstUserTitle,
     path,
     cwd,
     steps,
