@@ -3,3 +3,6 @@ dist
 .env
 .downshift/
 downshift-report/
+# Generated routing policy and benchmark outputs.
+downshift.policy.yaml
+downshift-report/bench-smoke.json

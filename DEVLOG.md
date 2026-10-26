@@ -234,3 +234,41 @@ guard runs before the rate limiter or key lookup.
 version endpoint, whether gemma4 is installed, one tiny Groq request, and
 OpenRouter key presence. Red is actionable, green means the zero-cost loop is
 ready.
+
+## 2026-10-26 19:20 IST — Speculative bench harness
+
+**The claim has to be runnable, not arguable.** `downshift bench` takes a task
+folder, copies it to a fresh temp directory (skipping `node_modules`), runs
+`npm install` there once, and then runs the same task three ways: every step on
+the big model, every step on the small model, and a speculative router.
+
+**The speculative router is the interesting one.** For each step the small
+model answers first. Its proposal is accepted only when it is a `read_file`,
+`search`, `list_files`, or a `run_command` that actually runs the tests.
+Anything else — edits, writes, other commands, `finish` — is discarded and the
+big model answers instead. Both calls are counted and priced, so the
+escalation rate and the list-price cost of the *rejected* proposals are part
+of the measurement, not hidden.
+
+**The sandbox is deliberately dull.** Every path is resolved against the temp
+copy and rejected if it escapes; commands are matched against a fixed
+prefix allow-list (`npm test`, `npx vitest run`, `ls`, `cat`, `grep`,
+`node -e`) and rejected if they chain another command or reach outside the
+copy. Commands run with a 60s timeout and their output is truncated to 1500
+characters.
+
+**Success is narrow on purpose.** A run passes only when `npm test` exits 0 in
+the temp copy *and* the test files are byte-for-byte unchanged (sha256 of
+every file under `test/`). An agent that rewrites the tests to make them pass
+is reported as `FAIL (tampered)`.
+
+**Status of the numbers.** The harness is complete and unit-tested
+(`test/bench-agent.test.ts` covers the path escape, the command allow-list,
+output truncation, the accept rules and the tampered-file check; `test/bench.test.ts`
+covers the pricing and the per-config summary). A short smoke run against
+Ollama (3 steps, task deliberately cut short) exercised the loop and produced
+a `FAIL`, as expected for a run that never reached the implementation. The
+full `--runs 2` matrix is long on the Groq free tier (the token bucket, not the
+code, is the bottleneck), so the published figures come from a full run
+executed outside the agent loop. Nothing in this repo claims a number that was
+not produced by a run.

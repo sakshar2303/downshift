@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { Command } from "commander";
 import pc from "picocolors";
 import { parseClaudeCodeTranscript } from "./ingest/claude-code.js";
@@ -41,6 +41,12 @@ import {
   type ProjectedSavings,
 } from "./policy/policy.js";
 import type { ReplayReport } from "./replay/run.js";
+import {
+  BENCH_CONFIG_IDS,
+  runBenchSuite,
+  type BenchConfigId,
+  type BenchReport,
+} from "./bench/bench.js";
 import type { Session, StepKind, Tokens } from "./types.js";
 
 const program = new Command();
@@ -251,6 +257,96 @@ function savingsBody(savings: ProjectedSavings): string {
 ${rows}
 </tbody></table>
 <p class="note">Projected at list prices — actual spend $0.</p>`;
+}
+
+function parseBenchConfigs(value: string): BenchConfigId[] {
+  const requested = value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== "");
+  const configs: BenchConfigId[] = [];
+  for (const entry of requested) {
+    if (!BENCH_CONFIG_IDS.includes(entry as BenchConfigId)) {
+      throw new Error(
+        `Unknown bench config "${entry}". Expected big, small, or downshift.`,
+      );
+    }
+    const id = entry as BenchConfigId;
+    if (!configs.includes(id)) configs.push(id);
+  }
+  if (configs.length === 0) {
+    throw new Error("At least one --configs entry is required.");
+  }
+  return configs;
+}
+
+function bar(
+  label: string,
+  percent: number,
+  value: string,
+): string {
+  const width = Math.max(0, Math.min(100, percent));
+  return `<div class="bar-row"><span>${escapeHtml(label)}</span><div class="bar-track"><div class="bar-fill" style="width:${width.toFixed(1)}%"></div></div><span class="bar-value">${escapeHtml(value)}</span></div>`;
+}
+
+function proofBody(report: BenchReport): string {
+  const maxPrice = Math.max(
+    0.000000001,
+    ...report.configs.map((config) => config.meanListPriceUsd),
+  );
+  const passBars = report.configs
+    .map((config) =>
+      bar(
+        config.id,
+        config.passRate * 100,
+        `${(config.passRate * 100).toFixed(0)}%`,
+      ),
+    )
+    .join("\n");
+  const priceBars = report.configs
+    .map((config) =>
+      bar(
+        config.id,
+        (config.meanListPriceUsd / maxPrice) * 100,
+        formatUsd(config.meanListPriceUsd),
+      ),
+    )
+    .join("\n");
+  const escalationBars = report.configs
+    .map((config) =>
+      bar(
+        config.id,
+        config.escalationPct,
+        `${config.escalationPct.toFixed(0)}%`,
+      ),
+    )
+    .join("\n");
+
+  return `<h3>Pass rate</h3>
+${passBars}
+<h3>Mean list price per run</h3>
+${priceBars}
+<h3>Escalation rate</h3>
+${escalationBars}
+<p class="hint">${escapeHtml(String(report.runs))} runs per config on ${escapeHtml(report.task)}; max ${escapeHtml(String(report.maxSteps))} steps. Success requires \`npm test\` to exit 0 with unchanged test files.</p>
+<p class="note">Actual spend: $0 (local + free tiers).</p>`;
+}
+
+function renderBenchTable(report: BenchReport): string {
+  const rows: string[][] = [
+    ["CONFIG", "PASS RATE", "MEAN STEPS", "MEAN LIST $", "ESCALATION", "WALL TIME"],
+  ];
+  for (const config of report.configs) {
+    rows.push([
+      config.id,
+      `${(config.passRate * 100).toFixed(0)}%`,
+      config.meanSteps.toFixed(1),
+      formatUsd(config.meanListPriceUsd),
+      `${config.escalationPct.toFixed(0)}%`,
+      formatDuration(config.meanWallMs),
+    ]);
+  }
+  return renderTable(rows);
 }
 
 function renderTable(rows: string[][]): string {
@@ -805,6 +901,106 @@ program
     },
   );
 
-program.addCommand(placeholder("bench", "Run the benchmark suite for open models"));
+program
+  .command("bench")
+  .description("Run big, small and speculative-downshift agents on a task")
+  .option("--task <path>", "benchmark task folder", "bench/tasks/csv-export")
+  .option("--runs <n>", "runs per config", "2")
+  .option("--big <model>", "big model ref", "groq:openai/gpt-oss-120b")
+  .option("--small <model>", "small model ref", "ollama:gemma4:latest")
+  .option("--max-steps <n>", "maximum agent steps per run", "30")
+  .option("--configs <list>", "comma-separated big,small,downshift", "big,small,downshift")
+  .option("--out <path>", "bench JSON output", "downshift-report/bench.json")
+  .option("--html <path>", "HTML report to augment", "downshift-report/report.html")
+  .action(
+    async (options: {
+      task: string;
+      runs: string;
+      big: string;
+      small: string;
+      maxSteps: string;
+      configs: string;
+      out: string;
+      html: string;
+    }) => {
+      try {
+        const runs = Number.parseInt(options.runs, 10);
+        if (!Number.isInteger(runs) || runs < 1) {
+          throw new Error(`Invalid --runs "${options.runs}".`);
+        }
+        const maxSteps = Number.parseInt(options.maxSteps, 10);
+        if (!Number.isInteger(maxSteps) || maxSteps < 1) {
+          throw new Error(`Invalid --max-steps "${options.maxSteps}".`);
+        }
+        parseModelRef(options.big);
+        parseModelRef(options.small);
+        const configs = parseBenchConfigs(options.configs);
+        const pricing = await loadPricing();
+        const lookup = createPriceLookup(pricing);
+
+        console.log(pc.bold("Downshift benchmark"));
+        console.log(
+          `${options.task} · ${runs} run(s) per config · max ${maxSteps} steps`,
+        );
+        console.log(
+          pc.dim(
+            "Groq's free tier is token-bucketed; long pauses between steps are the rate limiter, not a hang.",
+          ),
+        );
+
+        const report = await runBenchSuite({
+          taskDir: options.task,
+          runs,
+          bigModel: options.big,
+          smallModel: options.small,
+          configs,
+          maxSteps,
+          lookup,
+          onProgress: (message) => console.log(message),
+          onStep: (config, run, record) => {
+            const escalation = record.escalated ? pc.yellow(" escalated") : "";
+            console.log(
+              pc.dim(
+                `[${config} ${run}] step ${record.step} ${record.tool} (${record.kind}) → ${record.modelRef}${escalation} · ${(record.latencyMs / 1000).toFixed(1)}s`,
+              ),
+            );
+          },
+        });
+
+        mkdirSync(dirname(options.out), { recursive: true });
+        writeFileSync(options.out, JSON.stringify(report, null, 2), "utf8");
+
+        console.log(`\n${pc.bold("Results")}`);
+        console.log(renderBenchTable(report));
+        console.log(
+          pc.green("Actual spend: $0 (local + free tiers)"),
+        );
+        console.log(
+          pc.dim(
+            "Dollar figures are OpenRouter list-price equivalents for the same token counts; local Ollama is $0.",
+          ),
+        );
+        console.log(`Wrote ${options.out}`);
+
+        if (
+          addReportSections(options.html, [
+            {
+              id: "proof",
+              title: "Proof",
+              body: proofBody(report),
+            },
+          ])
+        ) {
+          console.log(`Updated ${options.html}`);
+        } else {
+          console.log(
+            pc.dim(`No HTML report at ${options.html}; skipped Proof section.`),
+          );
+        }
+      } catch (error) {
+        fail(error);
+      }
+    },
+  );
 
 program.parse();
