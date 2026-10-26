@@ -12,7 +12,10 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { classifyShellCommand } from "../classify/kinds.js";
+import {
+  classifyShellCommand,
+  splitCommandSegments,
+} from "../classify/kinds.js";
 import {
   chat,
   type ChatMessage,
@@ -65,6 +68,31 @@ function truncate(value: string, limit: number): string {
 
 function normalizeCommand(command: string): string {
   return command.trim().replace(/\s+/g, " ");
+}
+
+/** True when the command redirects stdin or stdout outside quotes. */
+function hasRedirection(command: string): boolean {
+  let quote: '"' | "'" | undefined;
+
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index] ?? "";
+
+    if (quote !== undefined) {
+      if (char === "\\" && quote === '"') {
+        index += 1;
+        continue;
+      }
+      if (char === quote) quote = undefined;
+      continue;
+    }
+
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+    if (char === ">" || char === "<") return true;
+  }
+  return false;
 }
 
 /**
@@ -437,7 +465,12 @@ export function acceptsDownshift(action: ProposedAction | undefined): boolean {
   }
   if (action.tool === "run_command") {
     const command = action.args.command;
-    return typeof command === "string" && runsTests(command);
+    if (typeof command !== "string") return false;
+    return (
+      splitCommandSegments(command).length === 1 &&
+      !hasRedirection(command) &&
+      classifyShellCommand(command) === "test"
+    );
   }
   return false;
 }
