@@ -1,3 +1,5 @@
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { Command } from "commander";
 import pc from "picocolors";
 import { parseClaudeCodeTranscript } from "./ingest/claude-code.js";
@@ -8,6 +10,11 @@ import {
 } from "./ingest/discover.js";
 import { loadOpencodeSession } from "./ingest/opencode.js";
 import { classifyStep, summarizeShellCalls } from "./classify/kinds.js";
+import {
+  buildSpeedscope,
+  stepFrameName,
+  validateSpeedscope,
+} from "./flame/speedscope.js";
 import {
   applyPricing,
   loadModelOverrides,
@@ -271,6 +278,54 @@ program
         ]);
       }
       console.log(renderTable(stepRows));
+
+      const speedscope = buildSpeedscope(session);
+      const validation = validateSpeedscope(speedscope);
+      if (!validation.valid) {
+        throw new Error(
+          `generated flamegraph failed validation: ${validation.errors.join("; ")}`,
+        );
+      }
+
+      const reportDir = "downshift-report";
+      mkdirSync(reportDir, { recursive: true });
+      writeFileSync(
+        join(reportDir, "flame.speedscope.json"),
+        JSON.stringify(speedscope, null, 2),
+        "utf8",
+      );
+      writeFileSync(
+        join(reportDir, "steps.json"),
+        JSON.stringify(
+          {
+            session: {
+              id: session.id,
+              title: session.title ?? null,
+              source: session.source,
+              path: session.path,
+            },
+            steps: session.steps.map((step) => ({
+              index: step.index,
+              kind: step.kind ?? "other",
+              frame: stepFrameName(step).name,
+              model: step.model,
+              provider: step.provider ?? null,
+              startedAt: step.startedAt,
+              tools: step.tools.map((tool) => tool.name),
+              tokens: step.tokens,
+              recordedCostUsd: step.recordedCostUsd ?? null,
+              costUsd: step.costUsd ?? null,
+            })),
+          },
+          null,
+          2,
+        ),
+        "utf8",
+      );
+
+      console.log(
+        `\nOpen https://www.speedscope.app and drag in ${reportDir}/flame.speedscope.json`,
+      );
     } catch (error) {
       fail(error);
     }

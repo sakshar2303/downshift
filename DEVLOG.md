@@ -158,3 +158,24 @@ from 82 to 96 steps while this change landed, so compare shares, not totals:
 `analyze` now also reports the headline directly: **42 of 89 bash calls were
 really reads/searches/tests**. That is the downshift opportunity the old
 classifier was throwing away.
+
+## 2026-10-26 15:40 IST — Cost flamegraph
+
+`downshift analyze` now writes `downshift-report/flame.speedscope.json` and
+`steps.json`. The flamegraph uses speedscope's evented format with cost as the
+x-axis: each step's width is its recomputed spend in integer micro-dollars, and
+the frames nest session -> phase -> kind -> step. Phases are contiguous runs:
+explore (read/search/web), plan (plan/delegate), implement (edit/shell/other),
+verify (test). Step frames read like the transcript: `read src/cli.ts`,
+`grep "pattern"`, `edit src/y.ts`, `npm test`, `plan`.
+
+When a step has no recomputed cost, its token count becomes the width and the
+profile is labelled `(tokens)` so a partially-priced session still renders
+instead of collapsing to zero. `validateSpeedscope()` checks the invariants that
+speedscope is unforgiving about — balanced LIFO opens/closes, in-range frame
+indices, non-decreasing `at`, and `endValue` matching the final tick — and
+`analyze` refuses to write a file that fails it.
+
+This is the first view that makes the pitch visual: long bars are where the
+money actually goes, and the read/search bars sitting under an expensive shell
+bucket are the downshift targets.
