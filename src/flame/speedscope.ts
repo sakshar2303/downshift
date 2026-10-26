@@ -5,6 +5,7 @@ import {
   classifyToolCall,
   splitCommandSegments,
 } from "../classify/kinds.js";
+import { displayPath } from "../paths.js";
 import type { Session, Step, StepKind, ToolCall } from "../types.js";
 
 const MAX_FRAME_CHARS = 80;
@@ -118,7 +119,11 @@ function grepPattern(segment: string): string | undefined {
   return match?.[1] ?? match?.[2] ?? match?.[3];
 }
 
-function bashFrameName(command: string, kind: StepKind): string {
+function bashFrameName(
+  command: string,
+  kind: StepKind,
+  sessionCwd?: string,
+): string {
   const segments = withoutCd(splitCommandSegments(command));
   const segment =
     segments.find((candidate) => {
@@ -139,7 +144,7 @@ function bashFrameName(command: string, kind: StepKind): string {
     const candidate = args.filter((arg) => !arg.startsWith("-")).pop();
     return candidate === undefined
       ? truncate(segment)
-      : truncate(`read ${candidate}`);
+      : truncate(`read ${displayPath(candidate, sessionCwd)}`);
   }
 
   if (kind === "search") {
@@ -155,10 +160,12 @@ function bashFrameName(command: string, kind: StepKind): string {
   if (kind === "edit") {
     const redirect = segment.match(/>\s*([^\s;&|]+)/);
     const target = redirect?.[1];
-    if (target !== undefined) return truncate(`edit ${target}`);
+    if (target !== undefined) return truncate(`edit ${displayPath(target, sessionCwd)}`);
     if (program === "tee") {
       const file = args.filter((arg) => !arg.startsWith("-")).pop();
-      if (file !== undefined) return truncate(`edit ${file}`);
+      if (file !== undefined) {
+        return truncate(`edit ${displayPath(file, sessionCwd)}`);
+      }
     }
     return truncate(`edit ${segment}`);
   }
@@ -172,7 +179,7 @@ interface StepFrame {
 }
 
 /** Human-readable frame name for a step, e.g. "read src/a.ts", "npm test". */
-export function stepFrameName(step: Step): StepFrame {
+export function stepFrameName(step: Step, sessionCwd?: string): StepFrame {
   const kind = step.kind ?? classifyStep(step);
 
   if (kind === "plan") return { name: "plan", kind };
@@ -185,19 +192,27 @@ export function stepFrameName(step: Step): StepFrame {
 
   const command = toolCommand(tool);
   if (command !== undefined) {
-    return { name: bashFrameName(command, kind), kind };
+    return { name: bashFrameName(command, kind, sessionCwd), kind };
   }
 
   if (kind === "read" || kind === "edit") {
-    const path = toolFilePath(tool) ?? tool.name;
-    return { name: truncate(`${kind} ${path}`), kind };
+    const path = toolFilePath(tool);
+    return {
+      name: truncate(`${kind} ${path === undefined ? tool.name : displayPath(path, sessionCwd)}`),
+      kind,
+    };
   }
 
   if (kind === "search") {
     const pattern = toolPattern(tool);
     if (pattern !== undefined) return { name: `grep "${pattern}"`, kind };
-    const target = toolFilePath(tool) ?? tool.name;
-    return { name: truncate(`${tool.name} ${target}`), kind };
+    const target = toolFilePath(tool);
+    return {
+      name: truncate(
+        `${tool.name} ${target === undefined ? tool.name : displayPath(target, sessionCwd)}`,
+      ),
+      kind,
+    };
   }
 
   if (kind === "web") {
@@ -273,7 +288,7 @@ export function buildSpeedscope(session: Session): SpeedscopeFile {
   let currentKind: StepKind | undefined;
 
   for (const step of session.steps) {
-    const frame = stepFrameName(step);
+    const frame = stepFrameName(step, session.cwd);
     const kind = frame.kind;
     const phase = PHASE_BY_KIND[kind];
 

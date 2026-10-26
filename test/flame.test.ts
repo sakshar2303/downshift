@@ -172,6 +172,24 @@ describe("stepFrameName", () => {
     ).toEqual({ name: "npm test", kind: "test" });
   });
 
+  it("shows paths relative to the session cwd", () => {
+    const cwd = "/tmp/workspace";
+    const withCwd = session([
+      step(0, "edit", [
+        tool("Edit", { file_path: "/tmp/workspace/src/cli.ts" }),
+      ]),
+    ]);
+    withCwd.cwd = cwd;
+
+    const frame = stepFrameName(withCwd.steps[0]!, cwd);
+    expect(frame.name).toBe("edit src/cli.ts");
+
+    const file = buildSpeedscope(withCwd);
+    const names = file.shared.frames.map((entry) => entry.name);
+    expect(names).toContain("edit src/cli.ts");
+    expect(names.some((name) => name.includes("/tmp/workspace"))).toBe(false);
+  });
+
   it("names edits from redirects and tool paths", () => {
     expect(
       stepFrameName(

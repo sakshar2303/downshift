@@ -10,6 +10,7 @@ import {
 } from "./ingest/discover.js";
 import { loadOpencodeSession } from "./ingest/opencode.js";
 import { classifyStep, summarizeShellCalls } from "./classify/kinds.js";
+import { displayPath } from "./paths.js";
 import {
   buildSpeedscope,
   stepFrameName,
@@ -200,7 +201,9 @@ program
 
       console.log(`${pc.bold("Session")}  ${session.title ?? "(untitled)"}`);
       console.log(`${pc.bold("Source")}   ${session.source}`);
-      console.log(`${pc.bold("Path")}     ${session.path}`);
+      console.log(
+        `${pc.bold("Path")}     ${displayPath(session.path, session.cwd)}`,
+      );
       console.log(`${pc.bold("Model")}    ${models || "-"}`);
       console.log(`${pc.bold("Steps")}    ${formatCount(session.steps.length)}`);
       console.log(
@@ -307,7 +310,7 @@ program
             steps: session.steps.map((step) => ({
               index: step.index,
               kind: step.kind ?? "other",
-              frame: stepFrameName(step).name,
+              frame: stepFrameName(step, session.cwd).name,
               model: step.model,
               provider: step.provider ?? null,
               startedAt: step.startedAt,
