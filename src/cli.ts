@@ -7,7 +7,13 @@ import {
   resolveTarget,
 } from "./ingest/discover.js";
 import { loadOpencodeSession } from "./ingest/opencode.js";
-import type { Session, Tokens } from "./types.js";
+import { classifyStep } from "./classify/kinds.js";
+import {
+  applyPricing,
+  loadModelOverrides,
+} from "./pricing/model-map.js";
+import { loadPricing } from "./pricing/openrouter.js";
+import type { Session, StepKind, Tokens } from "./types.js";
 
 const program = new Command();
 
@@ -24,6 +30,22 @@ function formatTimestamp(ms: number): string {
 
 function formatCount(value: number): string {
   return value.toLocaleString("en-US");
+}
+
+function formatUsd(value: number): string {
+  if (value === 0) return "$0.00";
+  if (value < 0.01) return `$${value.toFixed(6)}`;
+  return `$${value.toFixed(4)}`;
+}
+
+function sumStepTokens(tokens: Tokens): number {
+  return (
+    tokens.input +
+    tokens.output +
+    tokens.cacheRead +
+    tokens.cacheWrite +
+    tokens.reasoning
+  );
 }
 
 function renderTable(rows: string[][]): string {
@@ -142,32 +164,104 @@ program
 
 program
   .command("analyze")
-  .description("Inspect a session and show where its tokens went")
+  .description("Price a session and show where its spend went")
   .argument("[target]", "a .jsonl transcript, an OpenCode session id, or latest", "latest")
-  .action((target: string) => {
+  .action(async (target: string) => {
     try {
       const session = loadSession(target);
       const totals = sumTokens(session.steps);
 
+      const pricing = await loadPricing();
+      const overrides = loadModelOverrides();
+      const recomputedCost = applyPricing(session.steps, {
+        pricing,
+        overrides,
+      });
+
+      for (const step of session.steps) {
+        step.kind ??= classifyStep(step);
+      }
+
+      const models = [...new Set(session.steps.map((step) => step.model))]
+        .filter((model) => model !== "")
+        .join(", ");
+
+      const recorded = session.steps
+        .map((step) => step.recordedCostUsd)
+        .filter((cost): cost is number => cost !== undefined);
+      const recordedCost = recorded.reduce((sum, cost) => sum + cost, 0);
+
       console.log(`${pc.bold("Session")}  ${session.title ?? "(untitled)"}`);
       console.log(`${pc.bold("Source")}   ${session.source}`);
       console.log(`${pc.bold("Path")}     ${session.path}`);
+      console.log(`${pc.bold("Model")}    ${models || "-"}`);
       console.log(`${pc.bold("Steps")}    ${formatCount(session.steps.length)}`);
       console.log(
         `${pc.bold("Tokens")}   input=${formatCount(totals.input)} output=${formatCount(totals.output)} cacheRead=${formatCount(totals.cacheRead)} cacheWrite=${formatCount(totals.cacheWrite)} reasoning=${formatCount(totals.reasoning)}`,
       );
+      console.log(
+        `${pc.bold("Cost")}     ${formatUsd(recomputedCost)} (recomputed at public list rates)`,
+      );
+
+      if (
+        recorded.length > 0 &&
+        recordedCost === 0 &&
+        recomputedCost > 0
+      ) {
+        console.log(
+          pc.yellow(
+            "Recorded cost is $0 (Alan-hosted credits) — priced at public list rates.",
+          ),
+        );
+      }
 
       if (session.steps.length === 0) return;
-      console.log(`\n${pc.bold("First 10 steps")}`);
-      const rows: string[][] = [["INDEX", "MODEL", "TOOLS"]];
-      for (const step of session.steps.slice(0, 10)) {
+
+      interface KindSpend {
+        steps: number;
+        tokens: number;
+        cost: number;
+      }
+      const byKind = new Map<StepKind, KindSpend>();
+      for (const step of session.steps) {
+        const kind = step.kind ?? "other";
+        const bucket = byKind.get(kind) ?? { steps: 0, tokens: 0, cost: 0 };
+        bucket.steps += 1;
+        bucket.tokens += sumStepTokens(step.tokens);
+        bucket.cost += step.costUsd ?? 0;
+        byKind.set(kind, bucket);
+      }
+
+      const spendRows = [...byKind.entries()].sort(
+        (a, b) => b[1].cost - a[1].cost || a[0].localeCompare(b[0]),
+      );
+
+      console.log(`\n${pc.bold("Spend by step kind")}`);
+      const rows: string[][] = [["KIND", "STEPS", "TOKENS", "COST", "% SPEND"]];
+      for (const [kind, bucket] of spendRows) {
+        const share =
+          recomputedCost > 0 ? (bucket.cost / recomputedCost) * 100 : 0;
         rows.push([
+          kind,
+          formatCount(bucket.steps),
+          formatCount(bucket.tokens),
+          formatUsd(bucket.cost),
+          `${share.toFixed(1)}%`,
+        ]);
+      }
+      console.log(renderTable(rows));
+
+      console.log(`\n${pc.bold("First 10 steps")}`);
+      const stepRows: string[][] = [["INDEX", "KIND", "MODEL", "TOOLS"]];
+      for (const step of session.steps.slice(0, 10)) {
+        stepRows.push([
           String(step.index),
+          step.kind ?? "other",
           step.model || "-",
           step.tools.map((tool) => tool.name).join(", ") || "-",
         ]);
       }
-      console.log(renderTable(rows));
+      console.log(renderTable(stepRows));
     } catch (error) {
       fail(error);
     }

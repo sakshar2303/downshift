@@ -102,3 +102,26 @@ source-scoped views possible.
 totals match Alan's own session totals exactly. The ingestion is reading the
 same numbers the product shows, which is the baseline the whole cost story
 depends on.
+
+## 2026-10-26 15:20 IST — Pricing and step classification
+
+**Cost is now recomputed, not trusted.** Alan-hosted usage records every step at
+$0, so the numbers in the database say a session was free. `analyze` now prices
+each step from OpenRouter's public list rates: input at prompt, output at
+completion, cache reads at the cached rate, and cache writes at a derived rate
+(1.25x prompt for Anthropic, prompt otherwise, since OpenRouter publishes no
+cache-write price). The session total and the per-kind table are the first
+honest view of where money actually goes. When the recorded cost is $0 and the
+recomputed cost is not, the CLI says so explicitly.
+
+**Classification is deterministic on purpose.** Kind comes only from tool names
+and, for bash/execute, the command text. A step with several tools takes the
+highest-ranked kind (edit > test > shell > delegate > web > search > read), so a
+step that edited a file is an edit even if it also read one. No model call, no
+sampling, no judgement — the same transcript always yields the same table, which
+is what makes the savings claim reproducible.
+
+Model ids needed a translation layer: Claude Code reports
+`claude-opus-4-8`/`claude-sonnet-4-5-20250929`, OpenRouter wants
+`anthropic/claude-opus-4.8`/`anthropic/claude-sonnet-4.5`. Local Ollama models
+price at $0, and unknown ids warn once rather than pretending to be free.
