@@ -96,7 +96,7 @@ describe("toOpenRouterId", () => {
     expect(toOpenRouterId("gemma4:latest")).toBeUndefined();
     expect(toOpenRouterId("llama3.1", "ollama")).toBeUndefined();
     expect(isLocalModel("gemma4:latest")).toBe(true);
-    expect(isLocalModel("deepseek/deepseek-v4.1-flash:free")).toBe(false);
+    expect(isLocalModel("nvidia/nemotron-3-super-120b-a12b:free")).toBe(false);
   });
 
   it("honours config overrides", () => {

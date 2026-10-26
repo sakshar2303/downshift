@@ -28,10 +28,10 @@ describe("parseModelRef", () => {
       model: "gemma4:latest",
     });
     expect(
-      parseModelRef("openrouter:deepseek/deepseek-v4.1-flash:free"),
+      parseModelRef("openrouter:nvidia/nemotron-3-super-120b-a12b:free"),
     ).toEqual({
       provider: "openrouter",
-      model: "deepseek/deepseek-v4.1-flash:free",
+      model: "nvidia/nemotron-3-super-120b-a12b:free",
     });
   });
 
@@ -52,7 +52,7 @@ describe("parseModelRef", () => {
 describe("OpenRouter free guard", () => {
   it("allows :free models", () => {
     expect(() =>
-      assertModelAllowed("openrouter:deepseek/deepseek-v4.1-flash:free"),
+      assertModelAllowed("openrouter:nvidia/nemotron-3-super-120b-a12b:free"),
     ).not.toThrow();
   });
 

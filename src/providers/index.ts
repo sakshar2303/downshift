@@ -75,7 +75,7 @@ export const providers: Record<ProviderId, ProviderConfig> = {
     concurrency: 1,
     priceUsdPerToken: 0,
     // Free tier is 50/day; leave headroom for other tools on the same key.
-    defaultModel: "deepseek/deepseek-v4.1-flash:free",
+    defaultModel: "nvidia/nemotron-3-super-120b-a12b:free",
     limits: {
       requestsPerMinute: 15,
       dailyRequests: OPENROUTER_DAILY_LIMIT,
