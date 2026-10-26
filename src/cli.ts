@@ -195,9 +195,13 @@ program
   .description("Price a session and show where its spend went")
   .argument("[target]", "a .jsonl transcript, an OpenCode session id, or latest", "latest")
   .option("--open", "open the HTML report in the browser")
-  .action(async (target: string, options: { open?: boolean }) => {
+  .option("-t, --title <title>", "override the session title in the report")
+  .action(async (target: string, options: { open?: boolean; title?: string }) => {
     try {
       const session = loadSession(target);
+      if (options.title !== undefined && options.title.trim() !== "") {
+        session.title = options.title.trim();
+      }
       const totals = sumTokens(session.steps);
 
       const pricing = await loadPricing();

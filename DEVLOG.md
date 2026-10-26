@@ -199,3 +199,16 @@ Every string that comes from a transcript — title, model, frame labels, tool
 names, paths — is HTML-escaped before it reaches the page or an attribute. The
 report is meant to be shared, so a prompt containing markup must render as text,
 not execute.
+
+## 2026-10-26 18:20 IST — Readable report: legend and grouped view
+
+The report now shows a legend with the exact per-kind colors used by the chart,
+and opens in a Grouped view that merges same-named blocks under the same parent
+and packs them widest first — speedscope's "left heavy" layout. Chronology is
+still one click away with the Timeline toggle, and hover/zoom work in both
+views. Grouped is the default because the question the report answers is "where
+did the money go", not "what happened first".
+
+`downshift analyze --title <text>` overrides the session title in the HTML
+report and the speedscope profile, which makes shared screenshots and
+side-by-side runs easier to label without renaming the underlying transcript.

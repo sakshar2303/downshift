@@ -37,7 +37,7 @@ const PHASE_LABELS: Array<{ label: string; depth: number }> = [
   { label: "step", depth: 3 },
 ];
 
-interface Block {
+export interface Block {
   id: string;
   depth: number;
   label: string;
@@ -237,7 +237,188 @@ function buildBlocks(
   return { blocks, total };
 }
 
-function renderSvg(session: Session, blocks: Block[], total: number): string {
+function widestFirst<T>(
+  items: T[],
+  widthOf: (item: T) => number,
+  labelOf: (item: T) => string,
+): T[] {
+  return [...items].sort(
+    (a, b) => widthOf(b) - widthOf(a) || labelOf(a).localeCompare(labelOf(b)),
+  );
+}
+
+interface StepGroup {
+  label: string;
+  width: number;
+  costUsd: number;
+  tokens: number;
+  kind: StepKind;
+  phase: Phase;
+}
+
+interface KindGroup {
+  kind: StepKind;
+  width: number;
+  costUsd: number;
+  tokens: number;
+  steps: Map<string, StepGroup>;
+}
+
+interface PhaseGroup {
+  phase: Phase;
+  width: number;
+  costUsd: number;
+  tokens: number;
+  kinds: Map<StepKind, KindGroup>;
+}
+
+/**
+ * "Left heavy" layout: merge same-named blocks under the same parent, then pack
+ * each parent's children widest first. Leaves are merged by step frame label.
+ */
+export function buildGroupedBlocks(session: Session): Block[] {
+  const phases = new Map<Phase, PhaseGroup>();
+  let total = 0;
+  let totalCost = 0;
+  let totalTokens = 0;
+
+  for (const step of session.steps) {
+    const kind = step.kind ?? classifyStep(step);
+    const phase = PHASE_BY_KIND[kind];
+    const span = stepSpanValue(step).value;
+    const cost = step.costUsd ?? 0;
+    const tokens = tokensOf(step);
+    const label = stepFrameName(step, session.cwd).name;
+
+    total += span;
+    totalCost += cost;
+    totalTokens += tokens;
+
+    let phaseGroup = phases.get(phase);
+    if (phaseGroup === undefined) {
+      phaseGroup = {
+        phase,
+        width: 0,
+        costUsd: 0,
+        tokens: 0,
+        kinds: new Map(),
+      };
+      phases.set(phase, phaseGroup);
+    }
+    phaseGroup.width += span;
+    phaseGroup.costUsd += cost;
+    phaseGroup.tokens += tokens;
+
+    let kindGroup = phaseGroup.kinds.get(kind);
+    if (kindGroup === undefined) {
+      kindGroup = {
+        kind,
+        width: 0,
+        costUsd: 0,
+        tokens: 0,
+        steps: new Map(),
+      };
+      phaseGroup.kinds.set(kind, kindGroup);
+    }
+    kindGroup.width += span;
+    kindGroup.costUsd += cost;
+    kindGroup.tokens += tokens;
+
+    let stepGroup = kindGroup.steps.get(label);
+    if (stepGroup === undefined) {
+      stepGroup = { label, width: 0, costUsd: 0, tokens: 0, kind, phase };
+      kindGroup.steps.set(label, stepGroup);
+    }
+    stepGroup.width += span;
+    stepGroup.costUsd += cost;
+    stepGroup.tokens += tokens;
+  }
+
+  const blocks: Block[] = [
+    {
+      id: "grouped-session",
+      depth: 0,
+      label: session.title ?? "(untitled)",
+      start: 0,
+      end: total,
+      costUsd: totalCost,
+      tokens: totalTokens,
+    },
+  ];
+
+  let at = 0;
+  let blockId = 0;
+  for (const phaseGroup of widestFirst(
+    [...phases.values()],
+    (group) => group.width,
+    (group) => group.phase,
+  )) {
+    const phaseStart = at;
+    blocks.push({
+      id: `grouped-${blockId++}`,
+      depth: 1,
+      label: phaseGroup.phase,
+      start: phaseStart,
+      end: phaseStart + phaseGroup.width,
+      costUsd: phaseGroup.costUsd,
+      tokens: phaseGroup.tokens,
+      phase: phaseGroup.phase,
+    });
+
+    let phaseCursor = phaseStart;
+    for (const kindGroup of widestFirst(
+      [...phaseGroup.kinds.values()],
+      (group) => group.width,
+      (group) => group.kind,
+    )) {
+      const kindStart = phaseCursor;
+      blocks.push({
+        id: `grouped-${blockId++}`,
+        depth: 2,
+        label: kindGroup.kind,
+        start: kindStart,
+        end: kindStart + kindGroup.width,
+        costUsd: kindGroup.costUsd,
+        tokens: kindGroup.tokens,
+        kind: kindGroup.kind,
+        phase: phaseGroup.phase,
+      });
+
+      let kindCursor = kindStart;
+      for (const stepGroup of widestFirst(
+        [...kindGroup.steps.values()],
+        (group) => group.width,
+        (group) => group.label,
+      )) {
+        blocks.push({
+          id: `grouped-${blockId++}`,
+          depth: 3,
+          label: stepGroup.label,
+          start: kindCursor,
+          end: kindCursor + stepGroup.width,
+          costUsd: stepGroup.costUsd,
+          tokens: stepGroup.tokens,
+          kind: stepGroup.kind,
+          phase: stepGroup.phase,
+        });
+        kindCursor += stepGroup.width;
+      }
+
+      phaseCursor += kindGroup.width;
+    }
+
+    at += phaseGroup.width;
+  }
+
+  return blocks;
+}
+
+function renderSvg(
+  session: Session,
+  timeline: Block[],
+  grouped: Block[],
+  total: number,
+): string {
   const layoutTotal = total > 0 ? total : 1;
   const rowLabels = PHASE_LABELS.map(({ label, depth }) => {
     const y = ROW_TOP + depth * (ROW_HEIGHT + ROW_GAP) + ROW_HEIGHT / 2 + 4;
@@ -246,8 +427,35 @@ function renderSvg(session: Session, blocks: Block[], total: number): string {
 
   return `<svg id="icicle" viewBox="0 0 ${SVG_WIDTH} ${SVG_HEIGHT}" data-total="${layoutTotal}" role="img" aria-label="Cost flamegraph for ${escapeHtml(session.title ?? "session")}">
 ${rowLabels}
-${blockRows(blocks, total)}
+<g id="layer-timeline" style="display:none">
+${blockRows(timeline, total)}
+</g>
+<g id="layer-grouped">
+${blockRows(grouped, total)}
+</g>
 </svg>`;
+}
+
+const LEGEND_KINDS: StepKind[] = [
+  "read",
+  "search",
+  "web",
+  "edit",
+  "test",
+  "shell",
+  "plan",
+  "delegate",
+  "other",
+];
+
+function renderLegend(): string {
+  const items = LEGEND_KINDS.map(
+    (kind) =>
+      `<span class="legend-item"><span class="swatch" style="background:${KIND_COLORS[kind]}"></span>${kind}</span>`,
+  ).join("\n");
+  return `<div class="legend" aria-label="Step kind colors">
+${items}
+</div>`;
 }
 
 function renderCards(
@@ -338,6 +546,28 @@ h1 { margin: 0; font-size: 28px; line-height: 1.2; color: #f8fafc; }
 }
 .panel h2 { margin: 0 0 4px; font-size: 16px; color: #f8fafc; }
 .hint { margin: 0 0 14px; color: #94a3b8; font-size: 12px; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 0 0 12px; }
+.legend-item { display: inline-flex; align-items: center; gap: 6px; color: #cbd5e1; font-size: 12px; }
+.swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
+.view-toggle {
+  display: inline-flex;
+  padding: 2px;
+  margin: 0 0 14px;
+  background: #111c33;
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+}
+.view-toggle button {
+  padding: 5px 10px;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  color: #94a3b8;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.view-toggle button.active { background: #1d4ed8; color: #f8fafc; }
 svg { display: block; width: 100%; height: auto; }
 .blk { cursor: pointer; }
 .blk:hover rect { stroke: #f8fafc; stroke-width: 1.5; }
@@ -378,11 +608,20 @@ const SCRIPT = `
   var tip = document.getElementById("tip");
   if (!svg || !tip) return;
 
-  var blocks = Array.prototype.slice.call(svg.querySelectorAll("g.blk"));
+  var layers = {
+    timeline: document.getElementById("layer-timeline"),
+    grouped: document.getElementById("layer-grouped"),
+  };
+  var buttons = Array.prototype.slice.call(
+    document.querySelectorAll(".view-toggle button"),
+  );
+  if (!layers.timeline || !layers.grouped) return;
+
   var chartX = ${CHART_X};
   var chartWidth = ${CHART_WIDTH};
   var total = Number(svg.getAttribute("data-total")) || 1;
   var zoom = { start: 0, end: total };
+  var mode = "grouped";
 
   function money(value) {
     if (value === 0) return "$0.00";
@@ -390,9 +629,13 @@ const SCRIPT = `
     return "$" + value.toFixed(4);
   }
 
+  function currentBlocks() {
+    return Array.prototype.slice.call(layers[mode].querySelectorAll("g.blk"));
+  }
+
   function apply() {
     var span = Math.max(1, zoom.end - zoom.start);
-    blocks.forEach(function (group) {
+    currentBlocks().forEach(function (group) {
       var start = Number(group.getAttribute("data-start"));
       var end = Number(group.getAttribute("data-end"));
       var depth = Number(group.getAttribute("data-depth"));
@@ -477,7 +720,27 @@ const SCRIPT = `
     apply();
   });
 
-  apply();
+  function setMode(next) {
+    mode = next;
+    layers.timeline.style.display = next === "timeline" ? "" : "none";
+    layers.grouped.style.display = next === "grouped" ? "" : "none";
+    buttons.forEach(function (button) {
+      var active = button.getAttribute("data-mode") === next;
+      button.className = active ? "active" : "";
+      button.setAttribute("aria-pressed", active ? "true" : "false");
+    });
+    tip.style.display = "none";
+    zoom = { start: 0, end: total };
+    apply();
+  }
+
+  buttons.forEach(function (button) {
+    button.addEventListener("click", function () {
+      setMode(button.getAttribute("data-mode") || "grouped");
+    });
+  });
+
+  setMode("grouped");
 })();
 `;
 
@@ -517,7 +780,12 @@ export function buildHtmlReport(session: Session): string {
     .reduce((sum, entry) => sum + entry.costUsd, 0);
   const informativeShare = totalCost > 0 ? (informativeCost / totalCost) * 100 : 0;
 
-  const { blocks, total } = buildBlocks(session, totalCost, totalTokens);
+  const { blocks: timelineBlocks, total } = buildBlocks(
+    session,
+    totalCost,
+    totalTokens,
+  );
+  const groupedBlocks = buildGroupedBlocks(session);
   const path = displayPath(session.path, session.cwd);
 
   return `<!doctype html>
@@ -543,7 +811,12 @@ ${renderCards(session, totalCost, totalTokens, informativeShare)}
 <section class="panel">
 <h2>Cost flamegraph</h2>
 <p class="hint">Width is recomputed cost. Hover for details, click a block to zoom, click the top row to reset.</p>
-${renderSvg(session, blocks, total)}
+${renderLegend()}
+<div class="view-toggle" role="group" aria-label="Icicle view">
+<button type="button" data-mode="timeline" aria-pressed="false">Timeline</button>
+<button type="button" data-mode="grouped" aria-pressed="true" class="active">Grouped</button>
+</div>
+${renderSvg(session, timelineBlocks, groupedBlocks, total)}
 </section>
 
 <section class="panel">

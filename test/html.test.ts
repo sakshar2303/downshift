@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  buildGroupedBlocks,
   buildHtmlReport,
   escapeHtml,
   writeHtmlReport,
@@ -103,8 +104,10 @@ describe("buildHtmlReport", () => {
   });
 
   it("renders four rows of blocks with relative step frames", () => {
-    // session + 2 phases + 2 kinds + 2 steps
-    expect(html.match(/class="blk"/g)).toHaveLength(7);
+    // Both layers: each has session + 2 phases + 2 kinds + 2 steps.
+    expect(html.match(/class="blk"/g)).toHaveLength(14);
+    expect(html).toContain('id="layer-timeline"');
+    expect(html).toContain('id="layer-grouped"');
     expect(html).toContain("read src/a.ts");
     expect(html).toContain("edit src/y.ts");
     expect(html).not.toContain("/tmp/ws/src");
@@ -112,6 +115,43 @@ describe("buildHtmlReport", () => {
     expect(html).toContain(">phase</text>");
     expect(html).toContain(">kind</text>");
     expect(html).toContain(">step</text>");
+  });
+
+  it("shows a legend with the exact chart colors", () => {
+    for (const kind of [
+      "read",
+      "search",
+      "web",
+      "edit",
+      "test",
+      "shell",
+      "plan",
+      "delegate",
+      "other",
+    ]) {
+      expect(html).toContain(`>${kind}</span>`);
+    }
+
+    for (const color of [
+      "#2563eb",
+      "#0891b2",
+      "#7c3aed",
+      "#d97706",
+      "#16a34a",
+      "#ea580c",
+      "#a855f7",
+      "#c084fc",
+      "#64748b",
+    ]) {
+      expect(html).toContain(`background:${color}`);
+    }
+  });
+
+  it("defaults to the grouped view and offers a timeline toggle", () => {
+    expect(html).toContain('data-mode="timeline"');
+    expect(html).toContain('data-mode="grouped" aria-pressed="true"');
+    expect(html).toContain('id="layer-grouped">');
+    expect(html).toContain('id="layer-timeline" style="display:none"');
   });
 
   it("writes a report file", () => {
@@ -129,5 +169,98 @@ describe("buildHtmlReport", () => {
 describe("escapeHtml", () => {
   it("escapes the five HTML metacharacters", () => {
     expect(escapeHtml(`<>&"'`)).toBe("&lt;&gt;&amp;&quot;&#39;");
+  });
+});
+
+
+describe("buildGroupedBlocks", () => {
+  function groupedSession(): Session {
+    return {
+      id: "grouped",
+      source: "claude-code",
+      title: "Grouped",
+      path: "/tmp/ws/transcript.jsonl",
+      cwd: "/tmp/ws",
+      steps: [
+        step(
+          0,
+          "read",
+          { name: "Read", input: { file_path: "/tmp/ws/src/a.ts" } },
+          0.0001,
+          100,
+        ),
+        step(
+          1,
+          "edit",
+          { name: "Edit", input: { file_path: "/tmp/ws/src/x.ts" } },
+          0.0002,
+          200,
+        ),
+        step(
+          2,
+          "read",
+          { name: "Read", input: { file_path: "/tmp/ws/src/a.ts" } },
+          0.0003,
+          300,
+        ),
+        step(
+          3,
+          "read",
+          { name: "Read", input: { file_path: "/tmp/ws/src/b.ts" } },
+          0.00005,
+          50,
+        ),
+      ],
+    };
+  }
+
+  it("merges same-named leaves under the same parent and sums cost", () => {
+    const blocks = buildGroupedBlocks(groupedSession());
+    const labels = blocks.map((block) => `${block.depth}:${block.label}`);
+
+    // The second read of a.ts collapses into the first.
+    expect(labels).toEqual([
+      "0:Grouped",
+      "1:explore",
+      "2:read",
+      "3:read src/a.ts",
+      "3:read src/b.ts",
+      "1:implement",
+      "2:edit",
+      "3:edit src/x.ts",
+    ]);
+
+    const readA = blocks.find(
+      (block) => block.depth === 3 && block.label === "read src/a.ts",
+    );
+    expect(readA?.costUsd).toBeCloseTo(0.0004, 12);
+    expect(readA?.tokens).toBe(400);
+    expect((readA?.end ?? 0) - (readA?.start ?? 0)).toBe(400);
+  });
+
+  it("sorts phases, kinds and leaves widest first", () => {
+    const blocks = buildGroupedBlocks(groupedSession());
+
+    const phases = blocks.filter((block) => block.depth === 1);
+    expect(phases.map((block) => block.label)).toEqual([
+      "explore",
+      "implement",
+    ]);
+    expect(phases[0]?.start).toBe(0);
+    expect(phases[0]?.end).toBe(450);
+    expect(phases[1]?.start).toBe(450);
+    expect(phases[1]?.end).toBe(650);
+
+    const readSteps = blocks.filter(
+      (block) => block.depth === 3 && block.kind === "read",
+    );
+    expect(readSteps.map((block) => block.label)).toEqual([
+      "read src/a.ts",
+      "read src/b.ts",
+    ]);
+    expect(readSteps[0]?.start).toBe(0);
+    expect(readSteps[0]?.end).toBe(400);
+    expect(readSteps[1]?.start).toBe(400);
+    expect(readSteps[1]?.end).toBe(450);
   });
 });
