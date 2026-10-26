@@ -1,0 +1,51 @@
+export type StepKind =
+  | "read"
+  | "search"
+  | "web"
+  | "edit"
+  | "test"
+  | "shell"
+  | "plan"
+  | "delegate"
+  | "other";
+
+export interface Tokens {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  reasoning: number;
+}
+
+export interface ToolCall {
+  id: string;
+  name: string;
+  input: unknown;
+  output?: string;
+}
+
+export interface Step {
+  id: string;
+  index: number;
+  sessionId: string;
+  source: "claude-code" | "opencode";
+  model: string;
+  provider?: string;
+  startedAt: number;
+  tools: ToolCall[];
+  text?: string;
+  tokens: Tokens;
+  recordedCostUsd?: number;
+  isSidechain: boolean;
+  kind?: StepKind;
+  costUsd?: number;
+}
+
+export interface Session {
+  id: string;
+  source: Step["source"];
+  title?: string;
+  path: string;
+  cwd?: string;
+  steps: Step[];
+}

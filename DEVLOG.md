@@ -25,3 +25,23 @@ no paid fallbacks. If a model isn't free, it isn't in the loop.
 
 Storage will use Node's built-in `node:sqlite` (Node >= 22). No native
 dependencies, no `better-sqlite3`.
+## 2026-10-26 14:25 IST — Claude Code ingestion
+
+**Duplicate `message.id` discovery.** Claude Code does not write one JSONL line
+per API response. It writes one line per streamed content chunk, and every line
+carries the same `message.id` plus a full copy of the same `usage` object. Naive
+line-by-line parsing triple-counts tokens on a response that emitted text,
+thinking and a tool call. The parser now keys assistant lines by `message.id`,
+merges their content blocks into a single step in first-appearance order, and
+takes usage from the first line that reports it — once per id.
+
+Two smaller things the transcript forced us to handle: `tool_result` blocks
+arrive on separate `user` lines and have to be re-attached to a `tool_use` by
+id, and `content` is either a string or an array, so results are stringified and
+clipped at 4000 chars to keep one noisy command from swamping a session.
+
+**Lesson.** Token counts are the whole product here. If ingestion double-counts,
+every cost number downstream is wrong, and the downshift savings look bigger
+than they are. Dedupe is not an optimization, it is correctness.
+
+Todo: next up is pricing (src/pricing) over the normalized steps.
