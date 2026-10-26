@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { classifyStep, TEST_COMMAND_PATTERN } from "../src/classify/kinds.js";
+import {
+  classifyShellCommand,
+  classifyStep,
+  splitCommandSegments,
+  summarizeShellCalls,
+  TEST_COMMAND_PATTERN,
+} from "../src/classify/kinds.js";
 import type { Step, ToolCall } from "../src/types.js";
 
 function tool(name: string, input: unknown = {}): ToolCall {
@@ -41,10 +47,10 @@ describe("classifyStep", () => {
     expect(classifyStep(step([tool("Patch")]))).toBe("edit");
     expect(classifyStep(step([tool("Task")]))).toBe("delegate");
     expect(classifyStep(step([tool("Bash", { command: "git status" })]))).toBe(
-      "shell",
+      "search",
     );
     expect(classifyStep(step([tool("execute", { command: "ls" })]))).toBe(
-      "shell",
+      "search",
     );
   });
 
@@ -70,14 +76,12 @@ describe("classifyStep", () => {
   });
 
   it("does not treat unrelated commands as tests", () => {
-    for (const command of [
-      "echo test",
-      "npm install",
-      "cat package.json",
-      "tsconfig-check",
-    ]) {
+    for (const command of ["echo test", "npm install", "tsconfig-check"]) {
       expect(classifyStep(step([tool("Bash", { command })]))).toBe("shell");
     }
+    expect(classifyStep(step([tool("Bash", { command: "cat package.json" })]))).toBe(
+      "read",
+    );
   });
 
   it("treats missing or non-string commands as shell", () => {
@@ -91,7 +95,7 @@ describe("classifyStep", () => {
       classifyStep(step([tool("Read"), tool("Bash", { command: "npm test" })])),
     ).toBe("test");
     expect(classifyStep(step([tool("Read"), tool("Bash", { command: "ls" })]))).toBe(
-      "shell",
+      "search",
     );
     expect(classifyStep(step([tool("Read"), tool("Task")]))).toBe("delegate");
     expect(classifyStep(step([tool("Read"), tool("WebFetch")]))).toBe("web");
@@ -103,6 +107,64 @@ describe("classifyStep", () => {
     expect(classifyStep(step([]))).toBe("plan");
     expect(classifyStep(step([tool("TodoWrite")]))).toBe("plan");
     expect(classifyStep(step([tool("ExitPlanMode")]))).toBe("plan");
+  });
+
+  it("classifies reads and searches hidden inside bash commands", () => {
+    const cases: Array<[string, string]> = [
+      ["cd /x && cat src/a.ts", "read"],
+      ["grep -rn foo src | head -20", "search"],
+      ["git status && git log --oneline -5", "search"],
+      ["sed -n 1,80p f.ts", "read"],
+      ["sed -i 's/a/b/' f", "shell"],
+      ["npm run -s typecheck", "test"],
+      ["git add -A && git commit -m x && git push", "shell"],
+      ["cat > f.ts <<EOF", "shell"],
+      ["FOO=bar cat package.json", "read"],
+      ["ls -la", "search"],
+      ["rg TODO src", "search"],
+      ["find . -name '*.ts'", "search"],
+      ["npm run lint", "test"],
+      ["npx tsc --noEmit", "test"],
+      ["npx vitest run", "test"],
+      ["npm test 2>&1", "test"],
+      ["rm -rf dist", "shell"],
+      ["curl https://example.com", "shell"],
+      ["git diff HEAD~1", "search"],
+      ["grep -rn vitest src", "search"],
+      ["cat jest.config.ts", "read"],
+      ["make 2> build.log", "shell"],
+    ];
+
+    for (const [command, expected] of cases) {
+      expect(classifyShellCommand(command)).toBe(expected);
+      expect(classifyStep(step([tool("Bash", { command })]))).toBe(expected);
+    }
+  });
+
+  it("does not split on separators inside quotes", () => {
+    expect(splitCommandSegments('echo "a | b" && cat f')).toEqual([
+      'echo "a | b"',
+      "cat f",
+    ]);
+    expect(classifyShellCommand('grep "a|b" f && cat g')).toBe("search");
+  });
+
+  it("treats only all-plan tool sets as plan steps", () => {
+    expect(classifyStep(step([tool("TodoWrite"), tool("Edit")]))).toBe("edit");
+    expect(classifyStep(step([tool("ExitPlanMode"), tool("TodoWrite")]))).toBe(
+      "plan",
+    );
+  });
+
+  it("summarizes bash calls that were really reads, searches or tests", () => {
+    const steps = [
+      step([tool("Bash", { command: "cat package.json" })]),
+      step([tool("Bash", { command: "grep -rn foo src" })]),
+      step([tool("Bash", { command: "npm test" })]),
+      step([tool("Bash", { command: "git push" })]),
+      step([tool("Edit")]),
+    ];
+    expect(summarizeShellCalls(steps)).toEqual({ total: 4, informative: 3 });
   });
 
   it("falls back to other for unknown and MCP tools", () => {

@@ -7,7 +7,7 @@ import {
   resolveTarget,
 } from "./ingest/discover.js";
 import { loadOpencodeSession } from "./ingest/opencode.js";
-import { classifyStep } from "./classify/kinds.js";
+import { classifyStep, summarizeShellCalls } from "./classify/kinds.js";
 import {
   applyPricing,
   loadModelOverrides,
@@ -250,6 +250,15 @@ program
         ]);
       }
       console.log(renderTable(rows));
+
+      const shellCalls = summarizeShellCalls(session.steps);
+      if (shellCalls.total > 0) {
+        console.log(
+          pc.dim(
+            `${shellCalls.informative} of ${shellCalls.total} bash calls were really reads/searches/tests`,
+          ),
+        );
+      }
 
       console.log(`\n${pc.bold("First 10 steps")}`);
       const stepRows: string[][] = [["INDEX", "KIND", "MODEL", "TOOLS"]];

@@ -125,3 +125,36 @@ Model ids needed a translation layer: Claude Code reports
 `claude-opus-4-8`/`claude-sonnet-4-5-20250929`, OpenRouter wants
 `anthropic/claude-opus-4.8`/`anthropic/claude-sonnet-4.5`. Local Ollama models
 price at $0, and unknown ids warn once rather than pretending to be free.
+
+## 2026-10-26 15:25 IST — Bash commands are not all shell
+
+**The real-data finding.** Alan Code's agent rarely calls a `read` tool. It
+opens files with `cat`, searches with `grep -rn`, lists with `ls`, pages with
+`sed -n`, and inspects state with `git status`. Every one of those was a single
+`bash` tool call, so classification marked the step `shell` — the bucket that
+looks least downshiftable. The potential was there; the label hid it.
+
+Bash commands are now split into pipeline stages on `&&`, `||`, `;` and `|`
+(quote-aware), leading `cd` and env assignments are dropped, and each stage is
+classified by its program and subcommand. `cat`/`head`/`sed` without `-i` are
+reads, `grep`/`rg`/`ls`/`git status`/`git log` are searches, `npm run typecheck`
+and `npx tsc` are tests, and anything that writes (`>`, `>>`, `<<`, `sed -i`,
+`git commit`) stays shell. A stage-level result rolls up to the step with the
+same priority order as before.
+
+Plan tools also only name a step when they are the *only* tools in it. A step
+that writes a todo and then edits a file is an edit, not a plan.
+
+**Before/after on `downshift analyze latest:alan`.** The session is live and grew
+from 82 to 96 steps while this change landed, so compare shares, not totals:
+
+| | before (82 steps) | after (96 steps) |
+| --- | --- | --- |
+| shell | 45 steps, 45.0% of spend | 42 steps, 37.8% |
+| search | 0 steps | 12 steps, 7.4% |
+| read | 2 steps, 1.6% | 5 steps, 2.5% |
+| test | 16 steps, 14.0% | 17 steps, 17.6% |
+
+`analyze` now also reports the headline directly: **42 of 89 bash calls were
+really reads/searches/tests**. That is the downshift opportunity the old
+classifier was throwing away.
