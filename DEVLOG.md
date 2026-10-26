@@ -212,3 +212,25 @@ did the money go", not "what happened first".
 `downshift analyze --title <text>` overrides the session title in the HTML
 report and the speedscope profile, which makes shared screenshots and
 side-by-side runs easier to label without renaming the underlying transcript.
+
+## 2026-10-26 18:30 IST — Free-tier providers
+
+**Zero cost is enforced, not hoped for.** `src/providers/index.ts` is a registry
+of OpenAI-compatible providers reached through the `openai` SDK with a custom
+baseURL: local Ollama, Groq's free tier, and OpenRouter's free models. Every
+entry prices tokens at $0, and OpenRouter is wrapped in a guard that refuses any
+model id not ending in `:free` unless `--allow-paid` is passed. A paid call
+cannot happen by accident.
+
+The free tiers have real ceilings, so the client respects them: Groq uses token
+buckets for 25 requests/minute and 7,000 tokens/minute, OpenRouter allows 15
+requests/minute plus a persisted 45-per-day counter in
+`.downshift/openrouter-usage.json` (under the 50/day free limit), and Ollama runs
+one request at a time. `chat()` retries 429/5xx with exponential backoff and
+Retry-After, times out at 90 seconds, and never retries a paid request — the
+guard runs before the rate limiter or key lookup.
+
+`downshift doctor` probes the stack without ever printing a key: Ollama's
+version endpoint, whether gemma4 is installed, one tiny Groq request, and
+OpenRouter key presence. Red is actionable, green means the zero-cost loop is
+ready.

@@ -18,6 +18,8 @@ import {
   validateSpeedscope,
 } from "./flame/speedscope.js";
 import { writeHtmlReport } from "./report/html.js";
+import { runDoctor } from "./providers/doctor.js";
+import { configureProviders } from "./providers/index.js";
 import {
   applyPricing,
   loadModelOverrides,
@@ -139,7 +141,16 @@ program
   .description(
     "Find where your AI agent can downshift to an open model — and prove it.",
   )
-  .version("0.1.0");
+  .version("0.1.0")
+  .option(
+    "--allow-paid",
+    "allow non-:free OpenRouter models (paid use is off by default)",
+  )
+  .hook("preAction", (thisCommand) => {
+    configureProviders({
+      allowPaid: thisCommand.opts().allowPaid === true,
+    });
+  });
 
 program
   .command("sessions")
@@ -359,6 +370,23 @@ program
       );
       console.log(`Report: ${reportPath}`);
       if (options.open === true) openInBrowser(reportPath);
+    } catch (error) {
+      fail(error);
+    }
+  });
+
+program
+  .command("doctor")
+  .description("Check Ollama, Groq and OpenRouter free-tier setup")
+  .action(async () => {
+    try {
+      const checks = await runDoctor();
+      for (const check of checks) {
+        const mark = check.ok ? pc.green("✓") : pc.red("✗");
+        const detail = check.detail === "" ? "" : pc.dim(` — ${check.detail}`);
+        console.log(`${mark} ${check.name}${detail}`);
+      }
+      if (checks.some((check) => !check.ok)) process.exitCode = 1;
     } catch (error) {
       fail(error);
     }
