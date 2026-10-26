@@ -19,7 +19,11 @@ import {
 } from "./flame/speedscope.js";
 import { writeHtmlReport } from "./report/html.js";
 import { runDoctor } from "./providers/doctor.js";
-import { configureProviders } from "./providers/index.js";
+import { configureProviders, parseModelRef } from "./providers/index.js";
+import {
+  runReplay,
+  writeReplayReport,
+} from "./replay/run.js";
 import {
   applyPricing,
   loadModelOverrides,
@@ -42,6 +46,11 @@ function formatTimestamp(ms: number): string {
 
 function formatCount(value: number): string {
   return value.toLocaleString("en-US");
+}
+
+function formatDuration(ms: number): string {
+  if (ms < 60_000) return `${Math.max(0, Math.round(ms / 1_000))}s`;
+  return `${(ms / 60_000).toFixed(1)} min`;
 }
 
 function formatUsd(value: number): string {
@@ -376,6 +385,89 @@ program
   });
 
 program
+  .command("replay")
+  .description("Replay sampled session steps on free open models")
+  .argument(
+    "[target]",
+    "a .jsonl transcript, an OpenCode session id, or latest",
+    "latest",
+  )
+  .option(
+    "--models <models>",
+    "comma-separated model refs",
+    "ollama:gemma4:latest,groq:openai/gpt-oss-120b",
+  )
+  .option("--per-kind <n>", "max replayable steps per kind", "4")
+  .option("--seed <n>", "sampling seed", "42")
+  .action(
+    async (
+      target: string,
+      options: { models: string; perKind: string; seed: string },
+    ) => {
+      try {
+        const perKind = Number.parseInt(options.perKind, 10);
+        if (!Number.isInteger(perKind) || perKind < 0) {
+          throw new Error(`Invalid --per-kind "${options.perKind}".`);
+        }
+        const seed = Number.parseInt(options.seed, 10);
+        if (!Number.isInteger(seed)) {
+          throw new Error(`Invalid --seed "${options.seed}".`);
+        }
+        const models = options.models
+          .split(",")
+          .map((model) => model.trim())
+          .filter((model) => model !== "");
+        if (models.length === 0) {
+          throw new Error("At least one model is required.");
+        }
+        for (const model of models) parseModelRef(model);
+
+        const session = loadSession(target);
+        let wroteProgress = false;
+
+        const report = await runReplay(
+          session,
+          { models, perKind, seed },
+          {
+            onPlan(plan) {
+              console.log(
+                `Replay plan: ${formatCount(plan.totalCalls)} calls across ${plan.models.length} model(s), ${formatCount(plan.cachedCalls)} cached`,
+              );
+              for (const model of plan.models) {
+                console.log(
+                  `  ${model.modelRef} (${model.provider}): ${formatCount(model.calls)} calls${model.cached > 0 ? `, ${formatCount(model.cached)} cached` : ""}, ~${formatDuration(model.estimatedMs)}`,
+                );
+              }
+              console.log(`Estimated time: ~${formatDuration(plan.estimatedMs)}`);
+            },
+            onProgress(record, completed, total) {
+              const line = `[${completed}/${total}] step ${record.stepIndex} ${record.kind} → ${record.modelRef}${record.cached === true ? " (cached)" : ""}${record.error !== undefined ? " (error)" : ""}`;
+              if (process.stdout.isTTY) {
+                process.stdout.write(`\r\x1b[K${line}`);
+              } else {
+                console.log(line);
+              }
+              wroteProgress = true;
+            },
+          },
+        );
+
+        if (wroteProgress && process.stdout.isTTY) process.stdout.write("\n");
+
+        const path = writeReplayReport(report);
+        const cached = report.records.filter((record) => record.cached === true).length;
+        const failed = report.records.filter((record) => record.error !== undefined).length;
+        console.log(
+          `Replayed ${formatCount(report.records.length)} calls (${formatCount(cached)} cached, ${formatCount(failed)} failed)`,
+        );
+        console.log(`Wrote ${path}`);
+      } catch (error) {
+        fail(error);
+      }
+    },
+  );
+
+program
   .command("doctor")
   .description("Check Ollama, Groq and OpenRouter free-tier setup")
   .action(async () => {
@@ -392,7 +484,6 @@ program
     }
   });
 
-program.addCommand(placeholder("replay", "Replay recorded steps against an open model"));
 program.addCommand(placeholder("policy", "Manage routing policies for agent steps"));
 program.addCommand(placeholder("bench", "Run the benchmark suite for open models"));
 

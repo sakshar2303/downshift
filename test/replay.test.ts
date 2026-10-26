@@ -3,6 +3,7 @@ import {
   buildReplayRequest,
   type ReplayRequest,
 } from "../src/replay/context.js";
+import { sampleSteps } from "../src/replay/sampler.js";
 import {
   canonicalTools,
   stepCanonicalAction,
@@ -329,5 +330,87 @@ describe("buildReplayRequest", () => {
     expect(() => buildReplayRequest(session([]), 0, 10_000)).toThrow(
       /out of range/,
     );
+  });
+});
+
+describe("sampleSteps", () => {
+  const replayableSession = session([
+    ...Array.from({ length: 10 }, (_, index) =>
+      step(index, {
+        kind: "read",
+        tools: [tool("Read", { file_path: `src/f${index}.ts` })],
+      }),
+    ),
+    ...Array.from({ length: 5 }, (_, offset) =>
+      step(10 + offset, {
+        kind: "edit",
+        tools: [
+          tool("Edit", {
+            file_path: `src/e${offset}.ts`,
+            old_string: "a",
+            new_string: "b",
+          }),
+        ],
+      }),
+    ),
+    step(15, {
+      kind: "read",
+      isSidechain: true,
+      tools: [tool("Read", { file_path: "sidechain.ts" })],
+    }),
+    step(16, {
+      kind: "other",
+      tools: [tool("Task", { prompt: "do it" })],
+    }),
+    step(17, { kind: "plan", text: "I will edit a file." }),
+  ]);
+
+  it("caps samples per kind", () => {
+    const sampled = sampleSteps(replayableSession, 3, 42);
+    const byKind = new Map<string, number>();
+    for (const entry of sampled) {
+      byKind.set(entry.kind, (byKind.get(entry.kind) ?? 0) + 1);
+    }
+    expect(byKind.get("read")).toBe(3);
+    expect(byKind.get("edit")).toBe(3);
+    expect(byKind.get("plan")).toBe(1);
+  });
+
+  it("is deterministic for the same seed", () => {
+    expect(sampleSteps(replayableSession, 3, 42)).toEqual(
+      sampleSteps(replayableSession, 3, 42),
+    );
+  });
+
+  it("varies the selection with the seed", () => {
+    const first = sampleSteps(replayableSession, 3, 42).filter(
+      (entry) => entry.kind === "read",
+    );
+    const second = sampleSteps(replayableSession, 3, 43).filter(
+      (entry) => entry.kind === "read",
+    );
+    expect(first).not.toEqual(second);
+  });
+
+  it("returns every candidate when the group is below the cap", () => {
+    const edits = sampleSteps(replayableSession, 10, 7).filter(
+      (entry) => entry.kind === "edit",
+    );
+    expect(edits.map((entry) => entry.stepIndex)).toEqual([
+      10, 11, 12, 13, 14,
+    ]);
+  });
+
+  it("skips sidechain and non-replayable steps", () => {
+    const sampled = sampleSteps(replayableSession, 20, 42);
+    const indices = sampled.map((entry) => entry.stepIndex);
+    expect(indices).not.toContain(15);
+    expect(indices).not.toContain(16);
+    expect(indices).toContain(17);
+    expect(indices).toEqual([...indices].sort((a, b) => a - b));
+  });
+
+  it("returns nothing at a zero cap", () => {
+    expect(sampleSteps(replayableSession, 0, 42)).toEqual([]);
   });
 });

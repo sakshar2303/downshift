@@ -404,6 +404,7 @@ export type ChatTool = OpenAI.Chat.Completions.ChatCompletionTool;
 export interface ChatOptions {
   messages: ChatMessage[];
   tools?: ChatTool[];
+  toolChoice?: OpenAI.Chat.Completions.ChatCompletionToolChoiceOption;
   maxTokens?: number;
   temperature?: number;
   /** Explicit paid opt-in for this call; overrides configureProviders(). */
@@ -444,6 +445,7 @@ export async function chat(
       temperature: options.temperature,
     };
     if (options.tools !== undefined) body.tools = options.tools;
+    if (options.toolChoice !== undefined) body.tool_choice = options.toolChoice;
 
     let lastError: unknown;
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
