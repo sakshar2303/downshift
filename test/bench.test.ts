@@ -1,10 +1,15 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   priceRunSteps,
+  runBenchSuite,
   summarizeConfig,
   type BenchRunResult,
 } from "../src/bench/bench.js";
 import type { BenchStepRecord } from "../src/bench/agent.js";
+import type { ChatResult } from "../src/providers/index.js";
 import { ZERO_PRICE, type TokenPrice } from "../src/policy/policy.js";
 import type { Tokens } from "../src/types.js";
 
@@ -90,6 +95,67 @@ describe("priceRunSteps", () => {
 
   it("returns zero for no steps", () => {
     expect(priceRunSteps([], lookup)).toBe(0);
+  });
+});
+
+describe("runBenchSuite", () => {
+  it("keeps steps and list-price cost when a run aborts", async () => {
+    const taskDir = mkdtempSync(join(tmpdir(), "downshift-bench-suite-"));
+    mkdirSync(join(taskDir, "src"), { recursive: true });
+    writeFileSync(join(taskDir, "TASK.md"), "Implement a.\n");
+
+    const price: TokenPrice = {
+      promptPerToken: 1 / 1_000_000,
+      completionPerToken: 0,
+      cacheReadPerToken: 0,
+      cacheWritePerToken: 0,
+    };
+    let calls = 0;
+    const providerError = Object.assign(new Error("provider exploded"), {
+      status: 500,
+    });
+    const readReply: ChatResult = {
+      message: {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "1",
+            type: "function",
+            function: {
+              name: "read_file",
+              arguments: JSON.stringify({ path: "TASK.md" }),
+            },
+          },
+        ],
+      } as ChatResult["message"],
+      usage: { prompt_tokens: 1_000, completion_tokens: 0, total_tokens: 1_000 },
+      latencyMs: 1,
+    };
+
+    try {
+      const report = await runBenchSuite({
+        taskDir,
+        runs: 1,
+        configs: ["big"],
+        bigModel: "groq:big",
+        smallModel: "ollama:small",
+        install: false,
+        lookup: (modelRef) => (modelRef === "groq:big" ? price : undefined),
+        chatFn: async () => {
+          calls += 1;
+          if (calls === 1) return readReply;
+          throw providerError;
+        },
+      });
+
+      const runResult = report.configs[0]?.runs[0];
+      expect(runResult?.error).toContain("provider exploded");
+      expect(runResult?.steps).toBe(1);
+      expect(runResult?.listPriceUsd).toBeCloseTo(0.001, 12);
+    } finally {
+      rmSync(taskDir, { recursive: true, force: true });
+    }
   });
 });
 

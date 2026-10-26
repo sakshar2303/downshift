@@ -1,7 +1,7 @@
 import { rmSync } from "node:fs";
 import type { TokenPrice } from "../policy/policy.js";
 import { priceTokens } from "../policy/policy.js";
-import type { ModelChooser } from "./agent.js";
+import type { AgentOptions, ModelChooser } from "./agent.js";
 import {
   acceptsDownshift,
   hashTestFiles,
@@ -58,6 +58,10 @@ export interface BenchSuiteOptions {
   configs?: BenchConfigId[];
   maxSteps?: number;
   lookup: (modelRef: string) => TokenPrice | undefined;
+  /** Injectable chat client, for tests. */
+  chatFn?: AgentOptions["chatFn"];
+  /** Install dependencies in each temp copy (default true). */
+  install?: boolean;
   onProgress?: (message: string) => void;
   onStep?: (config: BenchConfigId, run: number, record: BenchStepRecord) => void;
 }
@@ -148,6 +152,9 @@ export async function runBenchSuite(
       );
 
       const startedAt = Date.now();
+      let seenSteps = 0;
+      let seenEscalated = 0;
+      let seenPriceUsd = 0;
       let result: BenchRunResult = {
         run,
         passed: false,
@@ -173,7 +180,12 @@ export async function runBenchSuite(
           ...(options.maxSteps !== undefined
             ? { maxSteps: options.maxSteps }
             : {}),
+          install: options.install,
+          ...(options.chatFn !== undefined ? { chatFn: options.chatFn } : {}),
           onStep: (record) => {
+            seenSteps += 1;
+            if (record.escalated) seenEscalated += 1;
+            seenPriceUsd += priceRunSteps([record], options.lookup);
             options.onStep?.(config, run, record);
           },
         });
@@ -198,6 +210,9 @@ export async function runBenchSuite(
       } catch (error) {
         result = {
           ...result,
+          steps: seenSteps,
+          escalatedSteps: seenEscalated,
+          listPriceUsd: seenPriceUsd,
           wallMs: Date.now() - startedAt,
           error: error instanceof Error ? error.message : String(error),
         };

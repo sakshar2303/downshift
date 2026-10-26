@@ -30,6 +30,16 @@ export const COMMAND_OUTPUT_LIMIT = 1_500;
 export const READ_OUTPUT_LIMIT = 6_000;
 export const TEXT_ONLY_NUDGE =
   "Use a tool to continue, or call finish with a summary if the task is done.";
+export const MALFORMED_TOOL_CALL_NUDGE =
+  "Your last tool call had invalid JSON arguments. Call the tool again with valid JSON.";
+
+const EMPTY_TOKENS: Tokens = {
+  input: 0,
+  output: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+  reasoning: 0,
+};
 
 /** Commands the benchmark agent may run, matched at a word boundary. */
 export const ALLOWED_COMMAND_PREFIXES = [
@@ -494,6 +504,8 @@ export interface BenchStepRecord {
   /** Every model call in this step (two when a proposal escalated). */
   calls: BenchCallRecord[];
   escalated: boolean;
+  /** Set when the provider failed and the step could not produce a response. */
+  error?: string;
 }
 
 export interface StepContext {
@@ -645,6 +657,20 @@ function callRecord(result: ChatResult, modelRef: string): BenchCallRecord {
 }
 
 /**
+ * Groq answers 400 when a model emits tool arguments that are not valid JSON.
+ * The call is worth one more try because the model can correct itself when told.
+ */
+function isMalformedToolCallError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  if ((error as Record<string, unknown>).status !== 400) return false;
+  const message =
+    error instanceof Error
+      ? error.message
+      : String((error as Record<string, unknown>).message ?? "");
+  return /failed to parse tool call arguments as json/i.test(message);
+}
+
+/**
  * Run a minimal tool-calling agent loop against a fresh temp copy of a task.
  *
  * The model is chosen per step. When `speculativeFallback` is set, the chosen
@@ -680,6 +706,24 @@ export async function runBenchAgent(
   let lastTool: string | undefined;
   let textOnlyReplies = 0;
 
+  const request: Parameters<typeof chat>[1] = {
+    messages,
+    tools: canonicalTools,
+    toolChoice: "auto",
+    temperature: 0,
+    maxTokens: 2_048,
+  };
+
+  const callModel = async (modelRef: string): Promise<ChatResult> => {
+    try {
+      return await chatFn(modelRef, request);
+    } catch (error) {
+      if (!isMalformedToolCallError(error)) throw error;
+      messages.push({ role: "user", content: MALFORMED_TOOL_CALL_NUDGE });
+      return await chatFn(modelRef, request);
+    }
+  };
+
   for (let step = 1; step <= maxSteps && !finished; step += 1) {
     const selectedModel = await options.chooseModel({
       step,
@@ -689,34 +733,45 @@ export async function runBenchAgent(
       history: steps,
     });
 
-    const first = await chatFn(selectedModel, {
-      messages,
-      tools: canonicalTools,
-      toolChoice: "auto",
-      temperature: 0,
-      maxTokens: 2_048,
-    });
-
-    let result = first;
+    let first: ChatResult;
+    let result: ChatResult;
     let modelRef = selectedModel;
     let escalated = false;
-    const calls = [callRecord(first, selectedModel)];
+    const calls: BenchCallRecord[] = [];
 
-    if (options.speculativeFallback !== undefined) {
-      const proposal = proposedAction(first);
-      if (!accept(proposal)) {
-        escalated = true;
-        escalatedSteps += 1;
-        result = await chatFn(options.speculativeFallback, {
-          messages,
-          tools: canonicalTools,
-          toolChoice: "auto",
-          temperature: 0,
-          maxTokens: 2_048,
-        });
-        modelRef = options.speculativeFallback;
-        calls.push(callRecord(result, modelRef));
+    try {
+      first = await callModel(selectedModel);
+      result = first;
+      calls.push(callRecord(first, selectedModel));
+      if (options.speculativeFallback !== undefined) {
+        const proposal = proposedAction(first);
+        if (!accept(proposal)) {
+          escalated = true;
+          escalatedSteps += 1;
+          result = await callModel(options.speculativeFallback);
+          modelRef = options.speculativeFallback;
+          calls.push(callRecord(result, modelRef));
+        }
       }
+    } catch (error) {
+      // Other provider errors still abort the run; only the malformed-JSON 400
+      // is safe to skip because the step produced no action to execute.
+      if (!isMalformedToolCallError(error)) throw error;
+      const record: BenchStepRecord = {
+        step,
+        modelRef: selectedModel,
+        tool: "error",
+        kind: "other",
+        tokens: EMPTY_TOKENS,
+        latencyMs: 0,
+        calls,
+        escalated,
+        error: error instanceof Error ? error.message : String(error),
+      };
+      steps.push(record);
+      lastTool = record.tool;
+      options.onStep?.(record);
+      continue;
     }
 
     const assistant = result.message;

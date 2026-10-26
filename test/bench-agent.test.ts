@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  MALFORMED_TOOL_CALL_NUDGE,
   Sandbox,
   TEXT_ONLY_NUDGE,
   acceptsDownshift,
@@ -503,6 +504,73 @@ describe("agent loop", () => {
     try {
       expect(result.finished).toBe(true);
       expect(result.steps).toHaveLength(2);
+    } finally {
+      rmSync(result.tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("retries once when the provider rejects malformed tool-call JSON", async () => {
+    let calls = 0;
+    let sawNudge = false;
+    const malformed = Object.assign(
+      new Error("400 Failed to parse tool call arguments as JSON"),
+      { status: 400 },
+    );
+    const result = await runBenchAgent({
+      taskDir: taskDir(),
+      install: false,
+      chooseModel: () => "groq:big",
+      chatFn: async (_modelRef, options) => {
+        calls += 1;
+        if (calls === 1) throw malformed;
+        sawNudge = options.messages.some(
+          (message) =>
+            message.role === "user" &&
+            message.content === MALFORMED_TOOL_CALL_NUDGE,
+        );
+        return reply(null, [
+          { id: "1", name: "finish", args: { summary: "recovered" } },
+        ]);
+      },
+    });
+
+    try {
+      expect(calls).toBe(2);
+      expect(sawNudge).toBe(true);
+      expect(result.finished).toBe(true);
+      expect(result.summary).toBe("recovered");
+      expect(result.steps).toHaveLength(1);
+      expect(result.steps[0]?.error).toBeUndefined();
+    } finally {
+      rmSync(result.tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("records a failed step and continues when the retry also fails", async () => {
+    let calls = 0;
+    const malformed = Object.assign(
+      new Error("400 Failed to parse tool call arguments as JSON"),
+      { status: 400 },
+    );
+    const result = await runBenchAgent({
+      taskDir: taskDir(),
+      install: false,
+      maxSteps: 3,
+      chooseModel: () => "groq:big",
+      chatFn: async () => {
+        calls += 1;
+        if (calls <= 2) throw malformed;
+        return reply(null, [
+          { id: "1", name: "finish", args: { summary: "continued" } },
+        ]);
+      },
+    });
+
+    try {
+      expect(result.finished).toBe(true);
+      expect(result.steps).toHaveLength(2);
+      expect(result.steps[0]?.tool).toBe("error");
+      expect(result.steps[0]?.error).toContain("Failed to parse");
     } finally {
       rmSync(result.tempDir, { recursive: true, force: true });
     }
