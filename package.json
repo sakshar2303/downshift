@@ -1,7 +1,30 @@
 {
   "name": "downshift",
   "version": "0.1.0",
-  "description": "Find where your AI agent can downshift to an open model — and prove it.",
+  "description": "Find where your AI agent can downshift to an open model \u2014 and prove it, using only free tiers and a local model.",
+  "keywords": [
+    "ai",
+    "coding-agent",
+    "llm",
+    "cost-optimization",
+    "token-cost",
+    "cli",
+    "replay",
+    "judge",
+    "routing-policy",
+    "ollama",
+    "groq",
+    "openrouter",
+    "free-tier"
+  ],
+  "homepage": "https://github.com/sakshar2303/downshift#readme",
+  "bugs": {
+    "url": "https://github.com/sakshar2303/downshift/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sakshar2303/downshift.git"
+  },
   "type": "module",
   "license": "MIT",
   "author": "Sakshar Dhawan",
