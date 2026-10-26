@@ -546,7 +546,7 @@ describe("agent loop", () => {
     }
   });
 
-  it("records a failed step and continues when the retry also fails", async () => {
+  it("records a failed step and continues when every retry also fails", async () => {
     let calls = 0;
     const malformed = Object.assign(
       new Error("400 Failed to parse tool call arguments as JSON"),
@@ -559,7 +559,7 @@ describe("agent loop", () => {
       chooseModel: () => "groq:big",
       chatFn: async () => {
         calls += 1;
-        if (calls <= 2) throw malformed;
+        if (calls <= 3) throw malformed;
         return reply(null, [
           { id: "1", name: "finish", args: { summary: "continued" } },
         ]);
@@ -567,10 +567,60 @@ describe("agent loop", () => {
     });
 
     try {
+      expect(calls).toBe(4);
       expect(result.finished).toBe(true);
       expect(result.steps).toHaveLength(2);
       expect(result.steps[0]?.tool).toBe("error");
       expect(result.steps[0]?.error).toContain("Failed to parse");
+    } finally {
+      rmSync(result.tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("retries a Groq tool_use_failed rejection for an unknown tool name", async () => {
+    let calls = 0;
+    let sawNudge = false;
+    // Exact shape Groq returned for gpt-oss emitting its "commentary" channel.
+    const rejection = Object.assign(
+      new Error(
+        "400 Tool call validation failed: attempted to call tool 'commentary' which was not in request.tools",
+      ),
+      {
+        status: 400,
+        code: "tool_use_failed",
+        error: {
+          message:
+            "Tool call validation failed: attempted to call tool 'commentary' which was not in request.tools",
+          type: "invalid_request_error",
+          code: "tool_use_failed",
+        },
+      },
+    );
+    const result = await runBenchAgent({
+      taskDir: taskDir(),
+      install: false,
+      chooseModel: () => "groq:big",
+      chatFn: async (_modelRef, options) => {
+        calls += 1;
+        if (calls === 1) throw rejection;
+        sawNudge = options.messages.some(
+          (message) =>
+            message.role === "user" &&
+            message.content === MALFORMED_TOOL_CALL_NUDGE,
+        );
+        return reply(null, [
+          { id: "1", name: "finish", args: { summary: "recovered" } },
+        ]);
+      },
+    });
+
+    try {
+      expect(calls).toBe(2);
+      expect(sawNudge).toBe(true);
+      expect(result.finished).toBe(true);
+      expect(result.summary).toBe("recovered");
+      expect(result.steps).toHaveLength(1);
+      expect(result.steps[0]?.error).toBeUndefined();
     } finally {
       rmSync(result.tempDir, { recursive: true, force: true });
     }

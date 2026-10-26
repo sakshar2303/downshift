@@ -31,7 +31,9 @@ export const READ_OUTPUT_LIMIT = 6_000;
 export const TEXT_ONLY_NUDGE =
   "Use a tool to continue, or call finish with a summary if the task is done.";
 export const MALFORMED_TOOL_CALL_NUDGE =
-  "Your last tool call had invalid JSON arguments. Call the tool again with valid JSON.";
+  "Your last tool call was invalid. Call one of the provided tools with valid JSON arguments.";
+/** A malformed tool call gets the step retried this many times before failing. */
+const MALFORMED_TOOL_CALL_RETRIES = 2;
 
 const EMPTY_TOKENS: Tokens = {
   input: 0,
@@ -657,17 +659,39 @@ function callRecord(result: ChatResult, modelRef: string): BenchCallRecord {
 }
 
 /**
- * Groq answers 400 when a model emits tool arguments that are not valid JSON.
- * The call is worth one more try because the model can correct itself when told.
+ * Groq answers 400 when a model emits an unusable tool call: arguments that are
+ * not valid JSON, or a tool name that was never offered (gpt-oss sometimes
+ * emits its internal channel name as a tool). The step is worth retrying
+ * because the model can correct itself when told.
  */
 function isMalformedToolCallError(error: unknown): boolean {
   if (typeof error !== "object" || error === null) return false;
   if ((error as Record<string, unknown>).status !== 400) return false;
+
+  const record = error as Record<string, unknown>;
+  const nested = typeof record.error === "object" && record.error !== null
+    ? (record.error as Record<string, unknown>)
+    : undefined;
+  const body = typeof record.body === "object" && record.body !== null
+    ? (record.body as Record<string, unknown>)
+    : undefined;
+  const bodyError = typeof body?.error === "object" && body.error !== null
+    ? (body.error as Record<string, unknown>)
+    : undefined;
+
+  const code = record.code ?? nested?.code ?? bodyError?.code;
+  if (typeof code === "string" && code.toLowerCase() === "tool_use_failed") {
+    return true;
+  }
+
   const message =
     error instanceof Error
       ? error.message
-      : String((error as Record<string, unknown>).message ?? "");
-  return /failed to parse tool call arguments as json/i.test(message);
+      : String(record.message ?? "");
+  return (
+    /tool call validation failed/i.test(message) ||
+    /failed to parse tool call/i.test(message)
+  );
 }
 
 /**
@@ -715,12 +739,19 @@ export async function runBenchAgent(
   };
 
   const callModel = async (modelRef: string): Promise<ChatResult> => {
-    try {
-      return await chatFn(modelRef, request);
-    } catch (error) {
-      if (!isMalformedToolCallError(error)) throw error;
-      messages.push({ role: "user", content: MALFORMED_TOOL_CALL_NUDGE });
-      return await chatFn(modelRef, request);
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await chatFn(modelRef, request);
+      } catch (error) {
+        if (
+          !isMalformedToolCallError(error) ||
+          attempt >= MALFORMED_TOOL_CALL_RETRIES
+        ) {
+          throw error;
+        }
+        // Tell the model why the call failed, then retry the same step.
+        messages.push({ role: "user", content: MALFORMED_TOOL_CALL_NUDGE });
+      }
     }
   };
 
@@ -754,8 +785,8 @@ export async function runBenchAgent(
         }
       }
     } catch (error) {
-      // Other provider errors still abort the run; only the malformed-JSON 400
-      // is safe to skip because the step produced no action to execute.
+      // Other provider errors still abort the run; only a retry-exhausted
+      // malformed tool call is safe to skip because it produced no action.
       if (!isMalformedToolCallError(error)) throw error;
       const record: BenchStepRecord = {
         step,
