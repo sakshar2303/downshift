@@ -78,7 +78,7 @@ export function escapeHtml(value: string): string {
   });
 }
 
-function formatUsd(value: number): string {
+export function formatUsd(value: number): string {
   if (value === 0) return "$0.00";
   if (value < 0.01) return `$${value.toFixed(6)}`;
   return `$${value.toFixed(4)}`;
@@ -722,6 +722,9 @@ footer { margin-top: 72px; padding-top: 16px; border-top: 1px solid var(--rule);
 .savings .label { color: var(--mute); font-size: 12px; }
 .savings .value { font: 600 26px var(--mono); letter-spacing: -0.02em; }
 .note { color: var(--accent); font-size: 13px; margin: 12px 0 0; }
+.lead { margin: 14px 0 6px; max-width: 760px; font: 500 21px / 1.4 var(--serif); }
+td.ok { color: #3f7a2b; font-family: var(--mono); }
+td.bad { color: var(--accent); font-family: var(--mono); }
 td.heat { transition: background 0.6s; }
 #tip {
   position: fixed;

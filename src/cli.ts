@@ -18,6 +18,7 @@ import {
   validateSpeedscope,
 } from "./flame/speedscope.js";
 import { addReportSections, escapeHtml, writeHtmlReport } from "./report/html.js";
+import { proofBody } from "./report/proof.js";
 import { runDoctor } from "./providers/doctor.js";
 import { configureProviders, parseModelRef } from "./providers/index.js";
 import {
@@ -273,58 +274,6 @@ function parseBenchConfigs(value: string): BenchConfigId[] {
     throw new Error("At least one --configs entry is required.");
   }
   return configs;
-}
-
-function bar(
-  label: string,
-  percent: number,
-  value: string,
-): string {
-  const width = Math.max(0, Math.min(100, percent));
-  return `<div class="bar-row"><span>${escapeHtml(label)}</span><div class="bar-track"><div class="bar-fill" style="width:${width.toFixed(1)}%"></div></div><span class="bar-value">${escapeHtml(value)}</span></div>`;
-}
-
-function proofBody(report: BenchReport): string {
-  const maxPrice = Math.max(
-    0.000000001,
-    ...report.configs.map((config) => config.meanListPriceUsd),
-  );
-  const passBars = report.configs
-    .map((config) =>
-      bar(
-        config.id,
-        config.passRate * 100,
-        `${(config.passRate * 100).toFixed(0)}%`,
-      ),
-    )
-    .join("\n");
-  const priceBars = report.configs
-    .map((config) =>
-      bar(
-        config.id,
-        (config.meanListPriceUsd / maxPrice) * 100,
-        formatUsd(config.meanListPriceUsd),
-      ),
-    )
-    .join("\n");
-  const escalationBars = report.configs
-    .map((config) =>
-      bar(
-        config.id,
-        config.escalationPct,
-        `${config.escalationPct.toFixed(0)}%`,
-      ),
-    )
-    .join("\n");
-
-  return `<h3>Pass rate</h3>
-${passBars}
-<h3>Mean list price per run</h3>
-${priceBars}
-<h3>Escalation rate</h3>
-${escalationBars}
-<p class="hint">${escapeHtml(String(report.runs))} runs per config on ${escapeHtml(report.task)}; max ${escapeHtml(String(report.maxSteps))} steps. Success requires \`npm test\` to exit 0 with unchanged test files.</p>
-<p class="note">Actual spend: $0 (local + free tiers).</p>`;
 }
 
 function renderBenchTable(report: BenchReport): string {
