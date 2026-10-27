@@ -134,15 +134,15 @@ describe("buildHtmlReport", () => {
     }
 
     for (const color of [
-      "#2563eb",
-      "#0891b2",
-      "#7c3aed",
-      "#d97706",
-      "#16a34a",
-      "#ea580c",
-      "#a855f7",
-      "#c084fc",
-      "#64748b",
+      "#3b6ea5",
+      "#2f8f8a",
+      "#6b5fb5",
+      "#d39a2c",
+      "#5a8f3d",
+      "#c8502f",
+      "#8c4f86",
+      "#b98bb3",
+      "#9a958a",
     ]) {
       expect(html).toContain(`background:${color}`);
     }
