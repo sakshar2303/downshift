@@ -159,6 +159,10 @@ so these pass rates show the harness working rather than a general success rate.
 Run from the repo with `npx tsx src/cli.ts <command>`, or `downshift <command>`
 after a global install.
 
+```bash
+npm install -g github:sakshar2303/downshift
+```
+
 | Command | What it does | Most useful flag |
 | --- | --- | --- |
 | `sessions` | List the newest local agent sessions | `--source alan` |
