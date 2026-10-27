@@ -52,12 +52,6 @@ import type { Session, StepKind, Tokens } from "./types.js";
 
 const program = new Command();
 
-function placeholder(name: string, description: string): Command {
-  return new Command(name).description(description).action(() => {
-    console.log(`${name}: not implemented yet`);
-  });
-}
-
 function formatTimestamp(ms: number): string {
   if (ms <= 0) return "-";
   return new Date(ms).toISOString().slice(0, 16).replace("T", " ");
