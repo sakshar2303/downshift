@@ -770,7 +770,7 @@ program
   .description("Turn replay scores into a routing policy and projected savings")
   .argument(
     "[report]",
-    "replay report path",
+    "a replay report path, or latest for the newest replay run",
     "downshift-report/replays.json",
   )
   .option("--threshold <n>", "minimum match rate to downshift a kind", "0.9")
@@ -798,17 +798,19 @@ program
           );
         }
 
-        const report = readReplayReport(reportPath);
+        const resolvedReportPath =
+          reportPath === "latest" ? "downshift-report/replays.json" : reportPath;
+        const report = readReplayReport(resolvedReportPath);
         const session = loadReportSession(report);
 
         if (options.rescore === true) {
           if (session === undefined) {
             throw new Error(
-              `Could not load the session referenced by ${reportPath} (${report.session.path}); cannot rescore.`,
+              `Could not load the session referenced by ${resolvedReportPath} (${report.session.path}); cannot rescore.`,
             );
           }
           const summary = rescoreReport(report, session);
-          writeReplayReport(report, reportPath);
+          writeReplayReport(report, resolvedReportPath);
           const kept =
             summary.kept > 0
               ? `, ${formatCount(summary.kept)} plan scores kept`
@@ -830,7 +832,7 @@ program
         );
         if (scored.length === 0) {
           throw new Error(
-            `No scored replay records in ${reportPath}. Run \`downshift replay latest\` again to attach action-match scores.`,
+            `No scored replay records in ${resolvedReportPath}. Run \`downshift replay latest\` again to attach action-match scores.`,
           );
         }
         const unscored = report.records.length - scored.length;
