@@ -42,7 +42,7 @@ Deeper evidence, only when the user asks for it:
 
 ```bash
 downshift replay latest            # replay sampled steps on local + free models
-downshift policy                   # turn replay scores into a routing policy
+downshift policy latest            # turn replay scores into a routing policy
 downshift bench --runs 2           # prove it end to end on a tiny task
 ```
 
