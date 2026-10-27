@@ -3,16 +3,20 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 jobs:
   check:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [22, 24]
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: ${{ matrix.node-version }}
           cache: npm
 
       - name: Install dependencies
@@ -23,3 +27,14 @@ jobs:
 
       - name: Test
         run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Smoke test (help)
+        run: node dist/cli.js --help
+
+      # Prices come from OpenRouter, so a network hiccup here is not our bug.
+      - name: Smoke test (analyze)
+        run: node dist/cli.js analyze test/fixtures/claude-code.jsonl
+        continue-on-error: true
