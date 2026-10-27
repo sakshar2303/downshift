@@ -448,6 +448,68 @@ ${blockRows(grouped, total)}
 </svg>`;
 }
 
+const TL_WIDTH = 1000;
+const TL_HEIGHT = 230;
+const TL_LEFT = 64;
+const TL_RIGHT = 16;
+const TL_TOP = 14;
+const TL_LINE_BOTTOM = 150;
+const TL_BAR_TOP = 168;
+const TL_BAR_BOTTOM = 206;
+
+/** Cumulative cost line over steps, with each step's own cost as a bar. */
+function renderCostTimeline(session: Session, totalCost: number): string {
+  const steps = session.steps;
+  if (steps.length === 0) return "";
+  const plotWidth = TL_WIDTH - TL_LEFT - TL_RIGHT;
+  const column = plotWidth / steps.length;
+  const maxStep = Math.max(0, ...steps.map((step) => step.costUsd ?? 0));
+  const yScale = totalCost > 0 ? (TL_LINE_BOTTOM - TL_TOP) / totalCost : 0;
+
+  let cumulative = 0;
+  const points: string[] = [`${TL_LEFT},${TL_LINE_BOTTOM}`];
+  const bars: string[] = [];
+  const hits: string[] = [];
+  steps.forEach((step, i) => {
+    const cost = step.costUsd ?? 0;
+    const kind = step.kind ?? classifyStep(step);
+    cumulative += cost;
+    const x = TL_LEFT + (i + 1) * column;
+    points.push(`${x.toFixed(2)},${(TL_LINE_BOTTOM - cumulative * yScale).toFixed(2)}`);
+    const height = maxStep > 0 ? (cost / maxStep) * (TL_BAR_BOTTOM - TL_BAR_TOP) : 0;
+    const left = TL_LEFT + i * column;
+    bars.push(
+      `<rect x="${left.toFixed(2)}" y="${(TL_BAR_BOTTOM - height).toFixed(2)}" width="${Math.max(0.6, column - 0.6).toFixed(2)}" height="${height.toFixed(2)}" fill="${KIND_COLORS[kind]}"/>`,
+    );
+    hits.push(
+      `<rect class="tl-hit" x="${left.toFixed(2)}" y="${TL_TOP}" width="${column.toFixed(2)}" height="${TL_BAR_BOTTOM - TL_TOP}" data-i="${i + 1}" data-kind="${kind}" data-label="${escapeHtml(stepFrameName(step, session.cwd).name)}" data-cost="${cost}" data-cum="${cumulative}" data-y="${(TL_LINE_BOTTOM - cumulative * yScale).toFixed(2)}"/>`,
+    );
+  });
+  const line = points.join(" ");
+  const area = `${line} ${TL_WIDTH - TL_RIGHT},${TL_LINE_BOTTOM}`;
+  const grid = [0.25, 0.5, 0.75, 1]
+    .map((fraction) => {
+      const y = TL_LINE_BOTTOM - fraction * (TL_LINE_BOTTOM - TL_TOP);
+      return `<line x1="${TL_LEFT}" x2="${TL_WIDTH - TL_RIGHT}" y1="${y.toFixed(2)}" y2="${y.toFixed(2)}" stroke="#e2ddd0" stroke-width="1"/><text x="${TL_LEFT - 8}" y="${(y + 4).toFixed(2)}" text-anchor="end" fill="#7d786e" font-size="11">${escapeHtml(formatUsd(totalCost * fraction))}</text>`;
+    })
+    .join("");
+
+  return `<svg id="timeline" viewBox="0 0 ${TL_WIDTH} ${TL_HEIGHT}" role="img" aria-label="Cumulative cost over ${steps.length} steps">
+${grid}
+<line x1="${TL_LEFT}" x2="${TL_WIDTH - TL_RIGHT}" y1="${TL_LINE_BOTTOM}" y2="${TL_LINE_BOTTOM}" stroke="#1a1917" stroke-width="1"/>
+<text x="${TL_LEFT - 8}" y="${TL_LINE_BOTTOM + 4}" text-anchor="end" fill="#7d786e" font-size="11">$0</text>
+<polygon class="tl-area" points="${area}" fill="#c8502f" fill-opacity="0.08"/>
+<polyline class="tl-line" points="${line}" fill="none" stroke="#c8502f" stroke-width="2" stroke-linejoin="round" pathLength="1"/>
+<text x="${TL_LEFT - 8}" y="${TL_BAR_TOP + 14}" text-anchor="end" fill="#7d786e" font-size="11">per step</text>
+${bars.join("")}
+<text x="${TL_LEFT}" y="${TL_HEIGHT - 6}" fill="#7d786e" font-size="11">step 1</text>
+<text x="${TL_WIDTH - TL_RIGHT}" y="${TL_HEIGHT - 6}" text-anchor="end" fill="#7d786e" font-size="11">step ${steps.length}</text>
+<line id="tl-cursor" x1="0" x2="0" y1="${TL_TOP}" y2="${TL_BAR_BOTTOM}" stroke="#1a1917" stroke-width="1" stroke-dasharray="3 3" style="display:none"/>
+<circle id="tl-dot" r="4" fill="#fbfaf6" stroke="#c8502f" stroke-width="2" style="display:none"/>
+${hits.join("")}
+</svg>`;
+}
+
 const LEGEND_KINDS: StepKind[] = [
   "read",
   "search",
@@ -726,6 +788,11 @@ footer { margin-top: 72px; padding-top: 16px; border-top: 1px solid var(--rule);
 td.ok { color: #3f7a2b; font-family: var(--mono); }
 td.bad { color: var(--accent); font-family: var(--mono); }
 td.heat { transition: background 0.6s; }
+#timeline .tl-hit { fill: transparent; cursor: crosshair; }
+.motion #timeline .tl-line { stroke-dasharray: 1; stroke-dashoffset: 1; transition: stroke-dashoffset 1.6s cubic-bezier(0.4, 0, 0.2, 1) 0.2s; }
+.motion #timeline .tl-area { opacity: 0; transition: opacity 0.8s ease 1.2s; }
+.motion .in #timeline .tl-line { stroke-dashoffset: 0; }
+.motion .in #timeline .tl-area { opacity: 1; }
 #tip {
   position: fixed;
   z-index: 40;
@@ -906,6 +973,50 @@ const SCRIPT = `
       });
     });
   });
+
+  // Cost over time: crosshair and tooltip per step.
+  var tl = document.getElementById("timeline");
+  var tlTip = document.getElementById("tip");
+  if (tl && tlTip) {
+    var cursor = document.getElementById("tl-cursor");
+    var dot = document.getElementById("tl-dot");
+    tl.addEventListener("mousemove", function (event) {
+      var hit = event.target && event.target.classList && event.target.classList.contains("tl-hit") ? event.target : null;
+      if (!hit) return;
+      var x = Number(hit.getAttribute("x")) + Number(hit.getAttribute("width"));
+      cursor.setAttribute("x1", x);
+      cursor.setAttribute("x2", x);
+      cursor.style.display = "";
+      dot.setAttribute("cx", x);
+      dot.setAttribute("cy", hit.getAttribute("data-y"));
+      dot.style.display = "";
+      tlTip.textContent = "";
+      var label = document.createElement("div");
+      label.className = "tip-label";
+      label.textContent = "step " + hit.getAttribute("data-i") + " · " + hit.getAttribute("data-kind");
+      var grid = document.createElement("div");
+      grid.className = "tip-grid";
+      var action = hit.getAttribute("data-label") || "";
+      if (action.length > 60) action = action.slice(0, 59) + "…";
+      [["action", action],
+       ["this step", money(Number(hit.getAttribute("data-cost")) || 0)],
+       ["running total", money(Number(hit.getAttribute("data-cum")) || 0)]].forEach(function (pair) {
+        var a = document.createElement("span"); a.textContent = pair[0];
+        var b = document.createElement("span"); b.textContent = pair[1];
+        grid.appendChild(a); grid.appendChild(b);
+      });
+      tlTip.appendChild(label);
+      tlTip.appendChild(grid);
+      tlTip.style.display = "block";
+      tlTip.style.left = Math.min(window.innerWidth - 380, event.clientX + 16) + "px";
+      tlTip.style.top = Math.min(window.innerHeight - 120, event.clientY + 16) + "px";
+    });
+    tl.addEventListener("mouseleave", function () {
+      cursor.style.display = "none";
+      dot.style.display = "none";
+      tlTip.style.display = "none";
+    });
+  }
 
   // Flamegraph: tooltip, animated zoom, breadcrumb, kind focus.
   var svg = document.getElementById("icicle");
@@ -1212,6 +1323,14 @@ ${renderLegend()}
 <div class="crumbs" id="crumbs" aria-live="polite"></div>
 <div class="chart">
 ${renderSvg(session, timelineBlocks, groupedBlocks, total)}
+</div>
+</section>
+
+<section class="panel">
+<h2>Cost over time</h2>
+<p class="hint">Running total of list-price cost, step by step. The strip below is each step's own cost, coloured by kind. Hover to read a step.</p>
+<div class="chart">
+${renderCostTimeline(session, totalCost)}
 </div>
 </section>
 

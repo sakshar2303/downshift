@@ -148,6 +148,12 @@ describe("buildHtmlReport", () => {
     }
   });
 
+  it("plots cumulative cost with one hover column per step", () => {
+    expect(html).toContain('id="timeline"');
+    expect(html.match(/class="tl-hit"/g)).toHaveLength(session.steps.length);
+    expect(html).toContain("Cost over time");
+  });
+
   it("defaults to the grouped view and offers a timeline toggle", () => {
     expect(html).toContain('data-mode="timeline"');
     expect(html).toContain('data-mode="grouped" aria-pressed="true"');

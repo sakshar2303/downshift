@@ -4,7 +4,7 @@
   <a href="https://github.com/sakshar2303/downshift/actions/workflows/ci.yml"><img src="https://github.com/sakshar2303/downshift/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/node-%3E%3D22-brightgreen" alt="Node >= 22">
-  <img src="https://img.shields.io/badge/tests-266%20passing-brightgreen" alt="266 tests passing">
+  <img src="https://img.shields.io/badge/tests-267%20passing-brightgreen" alt="267 tests passing">
   <img src="https://img.shields.io/badge/spend-%240-brightgreen" alt="Spend $0">
 </p>
 
@@ -307,7 +307,7 @@ src/
 ## Development
 
 ```bash
-npm run check   # typecheck, 266 tests, build
+npm run check   # typecheck, 267 tests, build
 ```
 
 Tests are Vitest files under `test/`, with unit tests per module (ingest,
