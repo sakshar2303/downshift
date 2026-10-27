@@ -1,4 +1,8 @@
 import { basename, dirname, isAbsolute, normalize, resolve } from "node:path";
+import {
+  classifyCommandSegment,
+  splitCommandSegments,
+} from "../classify/kinds.js";
 import type { CanonicalAction, CanonicalToolName } from "../replay/tools.js";
 
 /** A replay response can be a tool call, free text, or nothing at all. */
@@ -220,6 +224,244 @@ function scoreListFiles(replayed: JudgedAction, original: JudgedAction, cwd: str
     : 0;
 }
 
+/** Shell programs whose single-segment use is really reading one file. */
+const SHELL_READ_PROGRAMS = new Set(["cat", "head", "tail", "nl", "less", "sed"]);
+
+/** Shell programs whose single-segment use is a content search. */
+const SHELL_SEARCH_PROGRAMS = new Set(["grep", "rg"]);
+
+/** Shell programs whose single-segment use lists a directory. */
+const SHELL_LIST_PROGRAMS = new Set(["ls", "find", "tree"]);
+
+/** Options that consume the following word, per read program. */
+const READ_OPTIONS_WITH_VALUE: Readonly<Record<string, ReadonlySet<string>>> = {
+  cat: new Set(),
+  head: new Set(["-n", "-c", "--lines", "--bytes"]),
+  tail: new Set(["-n", "-c", "--lines", "--bytes"]),
+  nl: new Set(["-b", "-h", "-f", "-v", "-i", "-l", "-w", "-s"]),
+  less: new Set(["-P", "--prompt"]),
+  sed: new Set(["-e", "-f", "--expression", "--file"]),
+};
+
+const NO_OPTIONS: ReadonlySet<string> = new Set();
+
+const SEARCH_OPTIONS_WITH_VALUE: ReadonlySet<string> = new Set([
+  "-A", "-B", "-C", "-D", "-d", "-f", "-g", "-m", "-t",
+  "--after-context", "--before-context", "--context", "--directory",
+  "--exclude", "--exclude-dir", "--file", "--glob", "--include",
+  "--max-count", "--type", "--type-not",
+]);
+
+const LIST_OPTIONS_WITH_VALUE: ReadonlySet<string> = new Set([
+  "-A", "-D", "-I", "-L", "-O", "-P", "-w",
+  "--filelimit", "--timeout",
+  "-name", "-iname", "-path", "-ipath", "-type", "-maxdepth", "-mindepth",
+  "-size", "-perm", "-user", "-group", "-newer", "-regex", "-iregex",
+]);
+
+const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+/** Redirection tokens such as `2>/dev/null` or `2>&1` are not arguments. */
+const REDIRECTION = /^\d*[<>]/;
+
+/** Split one shell segment into words, honouring quoted strings. */
+function shellWords(segment: string): string[] {
+  const words: string[] = [];
+  let current = "";
+  let quote: '"' | "'" | undefined;
+  let started = false;
+
+  for (let index = 0; index < segment.length; index += 1) {
+    const char = segment[index] as string;
+
+    if (quote !== undefined) {
+      if (char === "\\" && quote === '"') {
+        const next = segment[index + 1];
+        if (next !== undefined) {
+          current += next;
+          index += 1;
+        }
+      } else if (char === quote) {
+        quote = undefined;
+      } else {
+        current += char;
+      }
+      continue;
+    }
+
+    if (char === '"' || char === "'") {
+      quote = char;
+      started = true;
+      continue;
+    }
+
+    if (/\s/.test(char)) {
+      if (started) {
+        words.push(current);
+        current = "";
+        started = false;
+      }
+      continue;
+    }
+
+    current += char;
+    started = true;
+  }
+
+  if (started) words.push(current);
+  return words;
+}
+
+/** Program and arguments of a segment, without leading `FOO=bar` assignments. */
+function programWords(segment: string): string[] {
+  const words = shellWords(segment);
+  let start = 0;
+  while (start < words.length && ENV_ASSIGNMENT.test(words[start] as string)) {
+    start += 1;
+  }
+  return words.slice(start);
+}
+
+function programOf(words: string[]): string {
+  return basename(words[0] ?? "").toLowerCase();
+}
+
+function isCdSegment(segment: string): boolean {
+  return programOf(programWords(segment)) === "cd";
+}
+
+/**
+ * Positional words of a command, skipping flags and the values of flags that
+ * take one. `head -n 40 f` yields `f`; `sed -n 1,80p f` yields the script and
+ * then `f`.
+ */
+function positionals(
+  args: string[],
+  optionsWithValue: ReadonlySet<string>,
+): string[] {
+  const values: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index] as string;
+    if (arg === "--") {
+      values.push(...args.slice(index + 1));
+      break;
+    }
+    if (arg.startsWith("-")) {
+      if (optionsWithValue.has(arg)) index += 1;
+      continue;
+    }
+    values.push(arg);
+  }
+  return values;
+}
+
+function readPathOf(args: string[], program: string): string | undefined {
+  const values = positionals(
+    args,
+    READ_OPTIONS_WITH_VALUE[program] ?? NO_OPTIONS,
+  );
+  // The file is last: `sed -n '1,80p' f` and `head -n 40 f` both end in it.
+  return values[values.length - 1];
+}
+
+function parseSearchArgs(
+  args: string[],
+): { pattern: string; path?: string } | undefined {
+  let pattern: string | undefined;
+  let path: string | undefined;
+
+  const addPositional = (value: string): void => {
+    if (pattern === undefined) pattern = value;
+    else if (path === undefined) path = value;
+  };
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index] as string;
+
+    if (arg === "--") {
+      for (const value of args.slice(index + 1)) addPositional(value);
+      break;
+    }
+    if (arg === "-e" || arg === "--regexp") {
+      const value = args[index + 1];
+      if (value !== undefined) {
+        pattern ??= value;
+        index += 1;
+      }
+      continue;
+    }
+    if (arg.startsWith("--regexp=")) {
+      pattern ??= arg.slice("--regexp=".length);
+      continue;
+    }
+    if (arg.startsWith("-e") && arg.length > 2) {
+      pattern ??= arg.slice(2);
+      continue;
+    }
+    if (arg.startsWith("-")) {
+      if (SEARCH_OPTIONS_WITH_VALUE.has(arg)) index += 1;
+      continue;
+    }
+    addPositional(arg);
+  }
+
+  if (pattern === undefined) return undefined;
+  return path === undefined ? { pattern } : { pattern, path };
+}
+
+/**
+ * Rewrite a shell command that only reads, searches or lists files into the
+ * canonical tool a replay model would call for the same work. Anything more
+ * complex — pipelines, writes, test runs — stays a shell command.
+ */
+export function canonicalizeShellCommand(
+  command: string,
+): CanonicalAction | undefined {
+  let segments = splitCommandSegments(command);
+  // `cd dir && cat f` is a read of f; the cd only sets the shell's context.
+  while (segments.length > 0 && isCdSegment(segments[0] as string)) {
+    segments = segments.slice(1);
+  }
+  if (segments.length !== 1) return undefined;
+
+  const segment = segments[0] as string;
+  const kind = classifyCommandSegment(segment);
+  if (kind !== "read" && kind !== "search") return undefined;
+
+  const words = programWords(segment);
+  const program = programOf(words);
+  const args = words.slice(1).filter((word) => !REDIRECTION.test(word));
+
+  if (kind === "read" && SHELL_READ_PROGRAMS.has(program)) {
+    const path = readPathOf(args, program);
+    return path === undefined
+      ? undefined
+      : { tool: "read_file", args: { path } };
+  }
+
+  if (kind === "search" && SHELL_SEARCH_PROGRAMS.has(program)) {
+    const parsed = parseSearchArgs(args);
+    return parsed === undefined ? undefined : { tool: "search", args: parsed };
+  }
+
+  if (kind === "search" && SHELL_LIST_PROGRAMS.has(program)) {
+    return {
+      tool: "list_files",
+      args: { path: positionals(args, LIST_OPTIONS_WITH_VALUE)[0] ?? "." },
+    };
+  }
+
+  return undefined;
+}
+
+/** Compare shell actions by what they do, not by the tool name they use. */
+export function canonicalizeAction(action: JudgedAction): JudgedAction {
+  if (!isToolAction(action) || action.tool !== "run_command") return action;
+  const command = stringArg(action, ["command"]);
+  if (command === undefined) return action;
+  return canonicalizeShellCommand(command) ?? action;
+}
+
 /**
  * Deterministically score how closely a replayed action reproduces the
  * original one. Returns 0 for plan steps (text), which the LLM judge scores
@@ -230,10 +472,12 @@ export function score(
   original: JudgedAction,
   cwd: string,
 ): number {
-  if (!isToolAction(replayed) || !isToolAction(original)) return 0;
+  const actual = canonicalizeAction(replayed);
+  const expected = canonicalizeAction(original);
+  if (!isToolAction(actual) || !isToolAction(expected)) return 0;
 
-  const replayedTool = replayed.tool;
-  const originalTool = original.tool;
+  const replayedTool = actual.tool;
+  const originalTool = expected.tool;
 
   if (replayedTool !== originalTool) {
     const nearMiss = NEAR_MISS_TOOLS.some(
@@ -246,16 +490,16 @@ export function score(
 
   switch (replayedTool) {
     case "read_file":
-      return scoreReadFile(replayed, original, cwd);
+      return scoreReadFile(actual, expected, cwd);
     case "search":
-      return scoreSearch(replayed, original, cwd);
+      return scoreSearch(actual, expected, cwd);
     case "list_files":
-      return scoreListFiles(replayed, original, cwd);
+      return scoreListFiles(actual, expected, cwd);
     case "run_command":
-      return scoreRunCommand(replayed, original);
+      return scoreRunCommand(actual, expected);
     case "edit_file":
     case "write_file":
-      return scoreEdit(replayed, original, cwd);
+      return scoreEdit(actual, expected, cwd);
     default:
       // finish has no comparable arguments; only an identical finish matches.
       return 1;

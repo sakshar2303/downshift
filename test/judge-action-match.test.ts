@@ -351,6 +351,97 @@ describe("run_command", () => {
   });
 });
 
+describe("shell reads canonicalize to file tools", () => {
+  it("matches a cd-prefixed cat against read_file at one", () => {
+    expect(
+      score(
+        action("read_file", { path: "src/cli.ts" }),
+        action("run_command", { command: "cd /repo && cat src/cli.ts" }),
+        CWD,
+      ),
+    ).toBe(1);
+  });
+
+  it("matches either direction of the same read", () => {
+    expect(
+      score(
+        action("run_command", { command: "cat src/cli.ts" }),
+        action("read_file", { path: "src/cli.ts" }),
+        CWD,
+      ),
+    ).toBe(1);
+  });
+
+  it("resolves absolute and relative read paths against the cwd", () => {
+    expect(
+      score(
+        action("read_file", { path: "src/cli.ts" }),
+        action("run_command", {
+          command: `cd ${CWD} && cat ${CWD}/src/cli.ts`,
+        }),
+        CWD,
+      ),
+    ).toBe(1);
+  });
+
+  it("matches grep against search", () => {
+    expect(
+      score(
+        action("search", { pattern: "pricing", path: "src" }),
+        action("run_command", { command: "grep -rn pricing src" }),
+        CWD,
+      ),
+    ).toBeGreaterThanOrEqual(0.8);
+  });
+
+  it("matches sed -n against read_file", () => {
+    expect(
+      score(
+        action("read_file", { path: "src/cli.ts" }),
+        action("run_command", { command: "sed -n '1,80p' src/cli.ts" }),
+        CWD,
+      ),
+    ).toBe(1);
+  });
+
+  it("matches ls against list_files", () => {
+    expect(
+      score(
+        action("list_files", { path: "src/ingest" }),
+        action("run_command", { command: "ls src/ingest" }),
+        CWD,
+      ),
+    ).toBe(1);
+  });
+
+  it("does not turn a test run into a file read", () => {
+    expect(
+      score(
+        action("read_file", { path: "src/cli.ts" }),
+        action("run_command", { command: "npm test" }),
+        CWD,
+      ),
+    ).toBe(0);
+  });
+
+  it("keeps pipelines and writes as shell commands", () => {
+    expect(
+      score(
+        action("read_file", { path: "src/cli.ts" }),
+        action("run_command", { command: "cat src/cli.ts | head" }),
+        CWD,
+      ),
+    ).toBe(0);
+    expect(
+      score(
+        action("read_file", { path: "src/cli.ts" }),
+        action("run_command", { command: "cat src/cli.ts > out.txt" }),
+        CWD,
+      ),
+    ).toBe(0);
+  });
+});
+
 describe("edit_file and write_file", () => {
   it("scores an identical same-path edit at one", () => {
     expect(

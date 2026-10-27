@@ -9,6 +9,11 @@ import {
 } from "../src/replay/context.js";
 import { sampleSteps } from "../src/replay/sampler.js";
 import {
+  rescoreReport,
+  type ReplayRecord,
+  type ReplayReport,
+} from "../src/replay/run.js";
+import {
   canonicalTools,
   stepCanonicalAction,
   toCanonicalAction,
@@ -506,5 +511,73 @@ describe("sampleSteps", () => {
 
   it("returns nothing at a zero cap", () => {
     expect(sampleSteps(replayableSession, 0, 42)).toEqual([]);
+  });
+});
+
+describe("rescoreReport", () => {
+  function record(
+    stepIndex: number,
+    overrides: Partial<ReplayRecord> = {},
+  ): ReplayRecord {
+    return {
+      stepIndex,
+      kind: "read",
+      modelRef: "ollama:gemma4:latest",
+      replayed: { tool: "read_file", args: { path: "src/a.ts" } },
+      usage: null,
+      latencyMs: 0,
+      ...overrides,
+    };
+  }
+
+  function reportWith(records: ReplayRecord[]): ReplayReport {
+    return {
+      version: 1,
+      generatedAt: "2026-10-27T00:00:00.000Z",
+      session: {
+        id: "session-replay",
+        title: "Replay",
+        source: "claude-code",
+        path: "/tmp/replay.jsonl",
+        model: "claude-sonnet-4-5",
+      },
+      options: { perKind: 4, seed: 42, models: ["ollama:gemma4:latest"] },
+      records,
+    };
+  }
+
+  const rescoreSession = session([
+    step(0, {
+      kind: "read",
+      tools: [tool("Bash", { command: "cd /tmp/project && cat src/a.ts" })],
+    }),
+    step(1, { kind: "plan", text: "I will read src/a.ts." }),
+  ]);
+
+  it("rescores tool records and keeps plan judge scores", () => {
+    const report = reportWith([
+      record(0, { score: 0 }),
+      record(1, {
+        kind: "plan",
+        replayed: { tool: "finish", args: { summary: "done" } },
+        score: 0.6,
+      }),
+    ]);
+
+    const summary = rescoreReport(report, rescoreSession);
+
+    expect(summary).toEqual({ rescored: 1, kept: 1, skipped: 0 });
+    expect(report.records[0]?.score).toBe(1);
+    expect(report.records[1]?.score).toBe(0.6);
+  });
+
+  it("skips errored and out-of-range records", () => {
+    const report = reportWith([
+      record(0, { error: "rate limited" }),
+      record(9),
+    ]);
+
+    const summary = rescoreReport(report, rescoreSession);
+    expect(summary).toEqual({ rescored: 0, kept: 0, skipped: 2 });
   });
 });

@@ -21,6 +21,7 @@ import { addReportSections, escapeHtml, writeHtmlReport } from "./report/html.js
 import { runDoctor } from "./providers/doctor.js";
 import { configureProviders, parseModelRef } from "./providers/index.js";
 import {
+  rescoreReport,
   runReplay,
   writeReplayReport,
 } from "./replay/run.js";
@@ -775,10 +776,19 @@ program
   .option("--threshold <n>", "minimum match rate to downshift a kind", "0.9")
   .option("--out <path>", "policy output path", "downshift.policy.yaml")
   .option("--html <path>", "HTML report to augment", "downshift-report/report.html")
+  .option(
+    "--rescore",
+    "recompute action-match scores from the stored replay responses",
+  )
   .action(
     async (
       reportPath: string,
-      options: { threshold: string; out: string; html: string },
+      options: {
+        threshold: string;
+        out: string;
+        html: string;
+        rescore?: boolean;
+      },
     ) => {
       try {
         const threshold = Number.parseFloat(options.threshold);
@@ -789,6 +799,31 @@ program
         }
 
         const report = readReplayReport(reportPath);
+        const session = loadReportSession(report);
+
+        if (options.rescore === true) {
+          if (session === undefined) {
+            throw new Error(
+              `Could not load the session referenced by ${reportPath} (${report.session.path}); cannot rescore.`,
+            );
+          }
+          const summary = rescoreReport(report, session);
+          writeReplayReport(report, reportPath);
+          const kept =
+            summary.kept > 0
+              ? `, ${formatCount(summary.kept)} plan scores kept`
+              : "";
+          const skipped =
+            summary.skipped > 0
+              ? `, ${formatCount(summary.skipped)} skipped`
+              : "";
+          console.log(
+            pc.bold(
+              `Rescored ${formatCount(summary.rescored)} tool records${kept}${skipped}`,
+            ),
+          );
+        }
+
         const scored = report.records.filter(
           (record) =>
             record.error === undefined && typeof record.score === "number",
@@ -843,7 +878,6 @@ program
         console.log(renderTable(routeRows));
         console.log(`\nWrote ${policyPath}`);
 
-        const session = loadReportSession(report);
         let savings: ProjectedSavings | undefined;
         if (session === undefined) {
           console.log(

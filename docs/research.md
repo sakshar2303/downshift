@@ -84,10 +84,14 @@ Alan Code runs on an OpenCode engine and keeps sessions in
    kind → emit `downshift.policy.yaml` → prove it with a speculative bench.
 3. **Scoring is deterministic where it can be.** A replayed tool call is scored
    by normalised path equality, token Jaccard over search patterns, command and
-   executable comparison, and normalized Levenshtein over new file text. Only
-   plan steps (text with no tool) go to an LLM judge, and that judge is asked a
-   narrow question with a zod-validated JSON answer and one retry. The same
-   transcript therefore produces the same score, for free.
+   executable comparison, and normalized Levenshtein over new file text. Before
+   comparing, a single-segment shell read/search/listing (`cat`, `sed -n`,
+   `grep`, `rg`, `ls`, `find`, `tree`, optionally behind `cd dir &&`) is
+   canonicalised to the equivalent `read_file`/`search`/`list_files` action, so
+   an agent that opens files with bash is not scored against the wrong tool
+   name. Only plan steps (text with no tool) go to an LLM judge, and that judge
+   is asked a narrow question with a zod-validated JSON answer and one retry.
+   The same transcript therefore produces the same score, for free.
 4. **The evidence loop runs at $0.** Local Ollama, Groq's free tier and
    OpenRouter `:free` models only, with a free guard that refuses non-`:free`
    OpenRouter ids, rate-limit-aware clients, and an on-disk cache keyed by model

@@ -415,3 +415,63 @@ export function writeReplayReport(
   writeFileSync(path, JSON.stringify(report, null, 2), "utf8");
   return path;
 }
+
+export interface RescoreSummary {
+  /** Tool records whose score was recomputed. */
+  rescored: number;
+  /** Plan records whose LLM judge score was left in place. */
+  kept: number;
+  /** Records that could not be rebound to the session or had an error. */
+  skipped: number;
+}
+
+/**
+ * Recompute action-match scores for an existing report from the replay
+ * responses already stored in it. No model calls: tool steps use the
+ * deterministic judge, and plan steps keep their LLM judge score.
+ */
+export function rescoreReport(
+  report: ReplayReport,
+  session: Session,
+): RescoreSummary {
+  const cwd = session.cwd ?? process.cwd();
+  const summary: RescoreSummary = { rescored: 0, kept: 0, skipped: 0 };
+
+  for (const record of report.records) {
+    if (record.error !== undefined) {
+      summary.skipped += 1;
+      continue;
+    }
+
+    // The report stores the replay response but not the recorded action, so
+    // rebuild it from the session it points at.
+    let original: ReplayRequest["original"];
+    try {
+      ({ original } = buildReplayRequest(
+        session,
+        record.stepIndex,
+        Number.POSITIVE_INFINITY,
+      ));
+    } catch {
+      // The session changed since the replay, so this record is unrescorable.
+      summary.skipped += 1;
+      continue;
+    }
+
+    if (original === null) {
+      summary.skipped += 1;
+      continue;
+    }
+
+    if ("text" in original) {
+      if (typeof record.score === "number") summary.kept += 1;
+      else summary.skipped += 1;
+      continue;
+    }
+
+    record.score = score(judgedAction(record.replayed), original, cwd);
+    summary.rescored += 1;
+  }
+
+  return summary;
+}
