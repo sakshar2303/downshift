@@ -8,6 +8,15 @@
   <img src="https://img.shields.io/badge/spend-%240-brightgreen" alt="Spend $0">
 </p>
 
+<p align="center">
+  <a href="#demo">Demo</a> ·
+  <a href="#try-it-in-60-seconds">Quickstart</a> ·
+  <a href="#architecture">Architecture</a> ·
+  <a href="#results">Results</a> ·
+  <a href="#commands">Commands</a> ·
+  <a href="#development">Development</a>
+</p>
+
 Downshift finds the steps in a coding-agent session that an open model can
 handle, then proves it by replaying them.
 
@@ -55,37 +64,21 @@ npx github:sakshar2303/downshift analyze latest:alan   # Alan Code
 The `downshift` name on npm belongs to an unrelated React library. Use the
 commands above.
 
-![Cost report](docs/assets/report.png)
+<p align="center"><img src="docs/assets/report.png" alt="Cost report" width="100%"></p>
 
 *The generated cost report: flamegraph, totals and spend by step kind.*
 
-![Terminal output](docs/assets/terminal.png)
+<p align="center"><img src="docs/assets/terminal.png" alt="Terminal output of downshift analyze" width="100%"></p>
 
 *`analyze` prints the same totals before writing the report.*
 
-## How it works
+## Architecture
+
+<p align="center"><img src="docs/assets/architecture.png" alt="Downshift architecture: two transcript sources feed ingest, then analyze, replay, policy and bench" width="100%"></p>
 
 Downshift treats one assistant turn plus the tools it called as the unit of
 analysis. Nothing is instrumented: the input is the transcript the agent already
 writes.
-
-```
- Claude Code JSONL ─┐
-                    ├─► ingest ─► classify ─► price at list rates ─► report.html
- Alan/OpenCode DB ──┘      │             │             │              + speedscope
-                           │             │             └─► per-kind spend map
-                           │             └─► read / search / edit / test / shell / plan
-                           ▼
-                    sampled steps ─► replay on free/local models ─► action match
-                                                                        │
-                                              plan steps only ─► LLM judge
-                                                                        │
-                                                                        ▼
-                                                              downshift.policy.yaml
-                                                                        │
-                                                                        ▼
-                                              speculative bench ─► proof at $0
-```
 
 - **Ingest** parses Claude Code JSONL, or copies and reads the Alan Code /
   OpenCode SQLite database plus its WAL sidecars. Split assistant lines are
@@ -102,6 +95,29 @@ writes.
 - **Speculative bench** runs one task on the big model, the small model and a
   router. The router accepts only small-model reads, searches, listings and test
   commands; everything else escalates, and both calls are priced.
+
+| Stage | Command | Modules | Writes | Calls a model? |
+| --- | --- | --- | --- | --- |
+| Cost map | `analyze` | `ingest/` `classify/` `pricing/` `report/` `flame/` | `downshift-report/report.html`, `flame.speedscope.json`, `steps.json` | No (fetches the public price list) |
+| Replay | `replay` | `replay/` `providers/` `judge/` | `downshift-report/replays.json` | Yes, free or local |
+| Policy | `policy` | `policy/` `report/` | `downshift.policy.yaml`, plus replay and savings sections in `report.html` | No |
+| Bench | `bench` | `bench/` `providers/` `report/` | `downshift-report/bench.json`, plus a proof section in `report.html` | Yes, free or local |
+
+### Core data model
+
+Both readers produce the same shape, defined in `src/types.ts`:
+
+- A **`Session`** has an `id`, a `source` (`claude-code` or `opencode`), an
+  optional `title`, the first user message (kept for replay context) and an
+  ordered list of steps.
+- A **`Step`** is one assistant turn: `model`, `startedAt`, the `tools` it
+  called (each a `ToolCall` with `name`, `input` and optional `output`), its
+  `text`, the `userText` that prompted it, and `isSidechain` for sub-agent turns.
+- **`tokens`** holds `input`, `output`, `cacheRead`, `cacheWrite` and
+  `reasoning`. `recordedCostUsd` is what the transcript claims; `costUsd` is
+  the list-price recomputation.
+- **`kind`** is one of `read`, `search`, `web`, `edit`, `test`, `shell`, `plan`,
+  `delegate` or `other`, set by `classify/`.
 
 ## Results
 
@@ -124,6 +140,12 @@ Alan": 194 steps on `deepseek/deepseek-v4.1-flash`, 26,863,020 tokens
 
 Read + search + test are 61 steps and **27.1%** of the recomputed spend.
 
+<p align="center"><img src="docs/assets/speedscope.png" alt="The session in speedscope" width="100%"></p>
+
+*The same session in speedscope (Left Heavy): phase → kind → step. Load
+[`docs/flame.speedscope.json`](docs/flame.speedscope.json) at
+[speedscope.app](https://www.speedscope.app).*
+
 **Replay and policy — `downshift-report/replays.json`,
 `downshift.policy.yaml`.** 48 replay calls were made: 4 sampled steps per kind on
 each of `ollama:gemma4:latest` and `groq:openai/gpt-oss-120b`. 15 calls failed
@@ -136,6 +158,32 @@ At the policy's 0.9 threshold no kind qualified, so the emitted policy routes
 all six kinds to the frontier model. Its evidence: read 0.5 over 2 samples;
 search, edit, test and shell 0 over 4; plan 0 over 1. Neither free model was a
 safe substitute on this session's sampled steps.
+
+<p align="center"><img src="docs/assets/replay.png" alt="Replay matrix" width="100%"></p>
+
+*Replay matrix from the report: share of sampled steps per kind whose replay
+scored at least 0.8 against the recorded action.*
+
+The start of the emitted `downshift.policy.yaml`:
+
+```yaml
+version: 1
+frontier: deepseek/deepseek-v4.1-flash
+threshold: 0.9
+route:
+  read: frontier
+  search: frontier
+  edit: frontier
+  test: frontier
+  shell: frontier
+  plan: frontier
+evidence:
+  read:
+    model: groq:openai/gpt-oss-120b
+    matchRate: 0.5
+    samples: 2
+  # … evidence for the other kinds
+```
 
 **Speculative bench — `downshift-report/bench.json`.** Task
 `bench/tasks/csv-export`, 2 runs per config, actual spend **$0**.
@@ -153,6 +201,12 @@ the tests passing in both.
 Both failures were local-model request timeouts (`Request timed out.`): the
 second small run and the second downshift run. The sample is 2 runs per config,
 so these pass rates show the harness working rather than a general success rate.
+
+<p align="center"><img src="docs/assets/terminal-bench.png" alt="Terminal output of downshift bench" width="100%"></p>
+
+*The bench run behind these numbers. The router kept the small model's reads,
+searches and test run, and escalated the edit, a text reply and the finish
+step to the big model.*
 
 ## Commands
 
