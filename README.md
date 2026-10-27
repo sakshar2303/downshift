@@ -1,20 +1,67 @@
-# Downshift
+<p align="center"><img src="docs/assets/banner.png" alt="Downshift" width="100%"></p>
 
-Find where your AI agent can downshift to an open model — and prove it.
+<p align="center">
+  <a href="https://github.com/sakshar2303/downshift/actions/workflows/ci.yml"><img src="https://github.com/sakshar2303/downshift/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
+  <img src="https://img.shields.io/badge/node-%3E%3D22-brightgreen" alt="Node >= 22">
+  <img src="https://img.shields.io/badge/tests-263%20passing-brightgreen" alt="263 tests passing">
+  <img src="https://img.shields.io/badge/spend-%240-brightgreen" alt="Spend $0">
+</p>
 
-## Problem
+Downshift finds the steps in a coding-agent session that an open model can
+handle, then proves it by replaying them.
 
-Coding agents send every step of a long session to a frontier model, even when
-the step is a file read, a search or a test run. Nobody knows which steps
-actually need the expensive model. Downshift measures that from transcripts the
-agent already wrote, using only free and local models.
+- **It measures** where a session's tokens and list-price cost go, broken down
+  by step kind: read, search, edit, test, shell and plan.
+- **It proves it** with replay, a mechanical judge and a speculative bench: the
+  same sampled steps run on free models, tool calls are compared exactly, and
+  the bench routes only safe step kinds to the small model.
+- **It is free** to run: Ollama locally, plus Groq and OpenRouter free tiers. No
+  credits, no paid fallback.
 
 ## Demo
 
-**Demo video: TODO — add link before submission.**
+<p align="center">
+  <a href="https://sakshar2303.github.io/downshift/demo.mp4">
+    <img src="docs/assets/demo-poster.png" alt="Downshift demo video" width="100%">
+  </a>
+</p>
 
-The same run leaves `downshift-report/report.html`, a self-contained cost
-flamegraph, and `downshift-report/flame.speedscope.json`. Both open offline.
+Live sample report: https://sakshar2303.github.io/downshift/
+
+## Try it in 60 seconds
+
+### No keys, no setup
+
+The repo ships a Claude Code transcript fixture. The transcript stays local;
+only public price data is fetched.
+
+```bash
+git clone https://github.com/sakshar2303/downshift.git
+cd downshift
+npm install
+npx tsx src/cli.ts analyze test/fixtures/claude-code.jsonl --open
+```
+
+### On your own agent
+
+`analyze latest` reads the newest session the agent has already recorded.
+
+```bash
+npx github:sakshar2303/downshift analyze latest        # Claude Code
+npx github:sakshar2303/downshift analyze latest:alan   # Alan Code
+```
+
+The `downshift` name on npm belongs to an unrelated React library. Use the
+commands above.
+
+![Cost report](docs/assets/report.png)
+
+*The generated cost report: flamegraph, totals and spend by step kind.*
+
+![Terminal output](docs/assets/terminal.png)
+
+*`analyze` prints the same totals before writing the report.*
 
 ## How it works
 
@@ -40,29 +87,31 @@ writes.
                                               speculative bench ─► proof at $0
 ```
 
-- **Ingest** — parse Claude Code JSONL, or copy and read the Alan Code /
-  OpenCode SQLite database plus its WAL sidecars. Merge split assistant lines,
-  attach tool results, and keep every human turn.
-- **Flamegraph** — attribute recomputed cost and tokens to each step kind, then
-  write an HTML icicle chart and a speedscope profile.
-- **Replay** — deterministically sample steps per kind and replay them against a
+- **Ingest** parses Claude Code JSONL, or copies and reads the Alan Code /
+  OpenCode SQLite database plus its WAL sidecars. Split assistant lines are
+  merged, tool results attached, and every human turn kept.
+- **Flamegraph** attributes recomputed cost and tokens to each step kind, then
+  writes an HTML icicle chart and a speedscope profile.
+- **Replay** deterministically samples steps per kind and replays them against a
   local or free model, rebuilding the conversation in chronological order.
-- **Judge** — score replayed tool calls by exact action match (normalised paths,
+- **Judge** scores replayed tool calls by exact action match (normalised paths,
   search terms, commands, edited text). Only plan steps, which have no tool call
   to compare, go to an LLM judge.
-- **Policy** — aggregate match rates per kind and emit a YAML routing rule, with
+- **Policy** aggregates match rates per kind and emits a YAML routing rule, with
   the frontier model as the fallback and projected list-price savings.
-- **Speculative bench** — run one task on the big model, the small model and a
+- **Speculative bench** runs one task on the big model, the small model and a
   router. The router accepts only small-model reads, searches, listings and test
   commands; everything else escalates, and both calls are priced.
 
 ## Results
 
-These are the numbers in `downshift-report/` and `DEVLOG.md`, not estimates.
+Every figure below is read from the generated report files in
+`downshift-report/` and `downshift.policy.yaml`.
 
 **Cost map — `downshift-report/steps.json`.** Session "Building Downshift in
-Alan": 194 steps on `deepseek/deepseek-v4.1-flash`, 26,763,641 tokens (1,700,613
-input, 92,916 output, 24,970,112 cache read), **$0.6009 list-price equivalent**.
+Alan": 194 steps on `deepseek/deepseek-v4.1-flash`, 26,863,020 tokens
+(1,700,613 input, 92,916 output, 24,970,112 cache read, 99,379 reasoning),
+**$0.6009 list-price equivalent**.
 
 | Kind | Steps | Share of list-price cost |
 | --- | ---: | ---: |
@@ -76,54 +125,52 @@ input, 92,916 output, 24,970,112 cache read), **$0.6009 list-price equivalent**.
 Read + search + test are 61 steps and **27.1%** of the recomputed spend.
 
 **Replay and policy — `downshift-report/replays.json`,
-`downshift.policy.yaml`.** 48 replay calls were made (4 sampled steps per kind
-on each of `ollama:gemma4:latest` and `groq:openai/gpt-oss-120b`). 30 produced a
-score; only one cleared the 0.8 action-match threshold (a read on gpt-oss). At
-the 0.9 policy threshold no kind qualified, so the emitted policy keeps all six
-kinds on the frontier model, with read evidence at 50% over 2 samples and
-search/edit/test/shell at 0% over 4. The honest result is that neither free
-model was a safe substitute on this session's sampled steps.
+`downshift.policy.yaml`.** 48 replay calls were made: 4 sampled steps per kind on
+each of `ollama:gemma4:latest` and `groq:openai/gpt-oss-120b`. 15 calls failed
+(12 Groq daily-token limits, 2 invalid tool calls, 1 connection error), 7
+returned no tool call and scored 0, and 3 plan steps returned only `finish` and
+were not scored. Of the 30 numeric scores, only 4 were above zero, and 2 cleared
+the 0.8 action-match threshold: one read on each model.
+
+At the policy's 0.9 threshold no kind qualified, so the emitted policy routes
+all six kinds to the frontier model. Its evidence: read 0.5 over 2 samples;
+search, edit, test and shell 0 over 4; plan 0 over 1. Neither free model was a
+safe substitute on this session's sampled steps.
 
 **Speculative bench — `downshift-report/bench.json`.** Task
 `bench/tasks/csv-export`, 2 runs per config, actual spend **$0**.
 
 | Config | Pass rate | Mean steps | Mean list-price cost | Escalation |
 | --- | ---: | ---: | ---: | ---: |
-| big (`gpt-oss-120b`) | 0.5 | 13.0 | $0.004140 | — |
-| small (`gemma4`) | 0.0 | 1.0 | $0 | — |
-| downshift (small → big) | 0.0 | 1.0 | $0 | 0% |
+| big (`gpt-oss-120b`) | 1.00 | 10.0 | $0.002282 | — |
+| small (`gemma4`) | 0.50 | 7.0 | $0 | — |
+| downshift (small → big) | 0.50 | 7.0 | $0.000747 | 21.4% |
 
-The sample is two runs per config, and the recorded run is dominated by
-`Request timed out`: every small and downshift run, plus one big run, hit the
-timeout before finishing. One big run passed in 19 steps. That is enough to
-exercise the harness, not enough to claim a general success rate.
+Best passing run of each config: big **$0.002254** (10 steps) vs downshift
+**$0.001494** (9 steps, 3 escalated), so **33.7% cheaper** on list price, with
+the tests passing in both.
 
-## Quickstart
+Both failures were local-model request timeouts (`Request timed out.`): the
+second small run and the second downshift run. The sample is 2 runs per config,
+so these pass rates show the harness working rather than a general success rate.
 
-Requires Node >= 22.
+## Commands
 
-```bash
-npm install
-cp .env.example .env          # add free-tier keys; never add credits
+Run from the repo with `npx tsx src/cli.ts <command>`, or `downshift <command>`
+after a global install.
 
-npx tsx src/cli.ts doctor     # probe Ollama, Groq and OpenRouter
-npx tsx src/cli.ts analyze latest
-npx tsx src/cli.ts replay latest
-npx tsx src/cli.ts policy latest
-npx tsx src/cli.ts bench
-```
+| Command | What it does | Most useful flag |
+| --- | --- | --- |
+| `sessions` | List the newest local agent sessions | `--source alan` |
+| `analyze [target]` | Price a session and write the HTML report | `--open` |
+| `replay [target]` | Replay sampled steps on free/local models | `--models ollama:gemma4:latest` |
+| `policy [report]` | Turn replay scores into a routing policy | `--threshold 0.9` |
+| `bench` | Run big, small and routed agents on a task | `--task bench/tasks/csv-export` |
+| `doctor` | Probe Ollama, Groq and OpenRouter | none |
 
-`analyze` and `policy` are local and cheap. `replay` and `bench` call live
-models and are slow on free tiers; they cache results under `.downshift/` so a
-rerun does not spend the free quota twice. Use `npx tsx src/cli.ts sessions` to
-find a session id if `latest` is not the one you want.
-
-For a production build:
-
-```bash
-npm run build
-node dist/cli.js --help
-```
+`analyze` and `policy` do not call a model. `replay` and `bench` call live
+models and are slow on free tiers; they cache results under `.downshift/`, so a
+rerun does not spend the free quota twice.
 
 ## Zero-cost by design
 
@@ -133,19 +180,17 @@ node dist/cli.js --help
   else unless `--allow-paid` is passed explicitly.
 - Replay and judge results are cached on disk and keyed by model plus prompt, so
   reruns cost nothing and stay reproducible offline.
-
-Every dollar figure is a **list-price equivalent** computed from OpenRouter's
-public rates, not money spent. Alan-hosted steps record `cost: 0`; the report
-says so wherever a total appears.
+- Every dollar figure is a **list-price equivalent** computed from OpenRouter's
+  public rates, not money spent. Alan-hosted steps record `cost: 0`; the report
+  says so wherever a total appears.
 
 ## Supported sources
 
 - **Claude Code** JSONL transcripts under `~/.claude/projects/<project>/`.
 - **Alan Code / OpenCode** SQLite sessions at
   `~/.alan/alan-code/engine/share/opencode/opencode.db` and
-  `~/.local/share/opencode/opencode.db`. The database is copied, with its
-  `-wal` and `-shm` files, and opened read-only so a live agent is not
-  disturbed.
+  `~/.local/share/opencode/opencode.db`. The database is copied with its `-wal`
+  and `-shm` files and opened read-only, so a live agent is not disturbed.
 
 Sidechain (sub-agent) steps are read for accounting but excluded from replay
 sampling and replay context.
@@ -173,10 +218,48 @@ sampling and replay context.
   neutral reconstruction plus prior turns.
 - Counterfactuals are single-step: a replay changes one step in isolation and
   assumes the rest of the trajectory would still happen.
+- The replay sample is small and uneven. 15 of 48 calls failed, mostly on Groq's
+  daily token cap, so some kinds have four scored samples and some have fewer.
+  The 0.8 match and 0.9 policy conclusions rest on that sample.
+- The bench is one small task with two runs per config. Two of six runs, both
+  starting on the local model, hit a request timeout. It demonstrates the
+  routing loop end to end; it is not a general success-rate estimate.
 - OpenRouter publishes no cache-write rate. Downshift approximates it as 1.25x
   the prompt rate for `anthropic/*` models and the prompt rate otherwise.
-- The bench is one small task with two runs per config. It demonstrates the
-  routing loop end to end; it is not a general success-rate estimate.
+
+## Project layout
+
+```
+src/
+  cli.ts            command wiring and terminal output
+  types.ts          shared session, step and token types
+  paths.ts          shortens absolute paths for display
+  ingest/           Claude Code JSONL and OpenCode SQLite readers
+  classify/         step-kind rules (read, search, edit, test, shell, plan)
+  pricing/          OpenRouter list prices and model mapping
+  report/           self-contained HTML cost report
+  flame/            speedscope profile and phase grouping
+  replay/           deterministic sampling, context rebuild, model calls
+  judge/            action-match scoring and the plan-step LLM judge
+  policy/           per-kind evidence and YAML routing policy
+  bench/            big/small/routed agents and the task harness
+  providers/        Ollama, Groq and OpenRouter clients, doctor
+```
+
+## Development
+
+```bash
+npm run check   # typecheck, 263 tests, build
+```
+
+Tests are Vitest files under `test/`, with unit tests per module (ingest,
+classify, pricing, replay, judge, policy, bench, report) plus integration tests
+for the bench agent and the HTML report. `test/fixtures/claude-code.jsonl` is
+the key-free fixture used above.
+
+CI runs on Node 22 and 24 (`ubuntu-latest`): `npm ci`, typecheck, tests, build,
+a `--help` smoke test, and an `analyze` smoke test that is allowed to fail when
+OpenRouter pricing cannot be fetched.
 
 ## Built with Alan
 
